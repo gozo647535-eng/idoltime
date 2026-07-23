@@ -14,7 +14,6 @@ import sys
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-import json
 import asyncio
 import datetime
 import re
@@ -26,9 +25,9 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 import sb  # Supabase 入出力(標準ライブラリのみ)
+from watchlist import build_watch_list  # 図鑑連動の監視リスト生成
 
 COOKIES_FILE = "cookies.json"
-ACCOUNTS_FILE = "accounts.json"
 
 # JST(アイドルのイベント時刻は日本時間前提)
 JST = datetime.timezone(datetime.timedelta(hours=9))
@@ -65,16 +64,6 @@ class ParsedTicketInfo(BaseModel):
 x_client = Client("en-US")
 
 TICKET_DOMAINS = ["ticket", "dive", "eplus", "livepocket", "t.livepocket", "pia", "l-tike", "t-dv.com"]
-
-
-def load_json_file(path, default):
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading {path}: {e}")
-    return default
 
 
 async def login_x() -> bool:
@@ -338,20 +327,18 @@ async def main() -> int:
     if not await login_x():
         print("X ログイン不可のため終了。")
         return 1
-    accounts = load_json_file(ACCOUNTS_FILE, [])
+    # 図鑑(catalog.json)+ 有志追記 + 手動リストから監視対象を自動生成
+    accounts = build_watch_list()
     if not accounts:
-        print("accounts.json に監視対象がありません。")
+        print("監視対象がありません(図鑑にXリンクが未登録の可能性)。")
         return 0
+    print(f"監視対象: {len(accounts)} アカウント")
     total = 0
     for entry in accounts:
-        handle = entry.get("handle")
-        slug = entry.get("idol_slug")
-        if not handle or not slug:
-            continue
         try:
-            total += await check_account(handle, slug)
+            total += await check_account(entry["handle"], entry["idol_slug"])
         except Exception as e:
-            print(f"{handle} の処理でエラー: {e}")
+            print(f"{entry.get('handle')} の処理でエラー: {e}")
             traceback.print_exc()
     print(f"完了。処理した新規投稿: {total} 件。")
     return 0

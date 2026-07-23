@@ -40,32 +40,40 @@ IdolLife 本体と同じ Supabase プロジェクトの SQL Editor で `worker_s
 | `SUPABASE_SERVICE_KEY` | Supabaseダッシュボード → Project Settings → API → **service_role** キー(絶対非公開) |
 | `GEMINI_API_KEY` | Google AI Studio の Gemini API キー(未設定なら正規表現解析にフォールバック) |
 | `X_COOKIES_JSON` | 既存ボットの `cookies.json` の**中身をそのまま**貼り付け |
-| `ACCOUNTS_JSON` | 監視対象リスト(下記 `accounts.example.json` 形式の JSON をそのまま貼り付け) |
+| `ACCOUNTS_JSON` | (任意)手動で追加ピン留めする監視リスト。通常は不要 |
 
 `cookies.json` が X 側で失効した場合のフォールバックとして、任意で
 `X_USERNAME` / `X_EMAIL` / `X_PASSWORD` も登録できます。
 
-### 3. 監視対象リスト(`ACCOUNTS_JSON`)
-`accounts.example.json` を参考に、監視する X ハンドルと、対応する図鑑アイドルの `slug` を
-並べます。`slug` は図鑑の公式アイドルの識別子で、`artist:<グループ名>` 形式です
-(例: `artist:CANDY TUNE`)。IdolLife はこの `idol_slug` でお気に入り判定します。
+### 3. 監視対象は図鑑から自動生成
+監視するXアカウントは、**IdolLife の図鑑に登録されたアイドルのXリンクから自動的に作られます**。
+手動でリストを維持する必要はありません。ワーカーは毎回:
 
-```json
-[
-  { "handle": "candytune_staff", "idol_slug": "artist:CANDY TUNE" }
-]
-```
+1. `catalog.json`(図鑑の公式アイドル。運営が配信)の各アイドルのXリンク
+2. 有志が承認済みで追記したXリンク(`idol_info`)
+
+を集め、`x.com` / `twitter.com` のURLからハンドルを抽出し、対応する `idol_slug` に紐づけます。
+つまり **図鑑にアイドルのXアカウントを登録すれば、自動で監視対象に加わります**。
+
+- 図鑑にXリンクを増やす方法: 運営が `catalog.json` の該当アイドルの `links` にXを追記
+  (`{"label":"X","url":"https://x.com/ハンドル"}`)してデプロイ、または利用者がアプリの
+  「このグループの情報を追記」でXを追記 → 運営承認。
+- どうしても図鑑に無いアカウントを個別に追加したい場合のみ、`ACCOUNTS_JSON`(任意)に
+  `[{"handle":"...","idol_slug":"artist:..."}]` を入れると手動で加えられます。
+- 図鑑のデータ元URLを変えたい場合は `CATALOG_URL` を Secret/環境変数で上書きできます
+  (既定: `https://idollife.vercel.app/catalog.json`)。
 
 ### 4. 実行
-- 30分ごとに自動実行されます(`.github/workflows/ingest.yml` の cron を変更可能)。
+- 6時間ごとに自動実行されます(`.github/workflows/ingest.yml` の cron を変更可能)。
 - **Actions タブ → Ingest ticket posts → Run workflow** で手動実行もできます。
 - 初回は各アカウントの最新投稿位置を記録するだけで、通知(取り込み)は次回以降の新規投稿からになります。
 
 ## ファイル
 
 - `worker.py` — メイン(X取得・解析・Supabase書き込み)
+- `watchlist.py` — 図鑑(catalog.json)+有志追記から監視対象を自動生成
 - `sb.py` — Supabase 入出力(標準ライブラリのみ)
-- `accounts.example.json` — 監視対象リストの例
+- `accounts.example.json` — (任意)手動追加リストの例
 - `worker_schema.sql` — `worker_state` テーブル定義
 - `.github/workflows/ingest.yml` — 定期実行ワークフロー
 

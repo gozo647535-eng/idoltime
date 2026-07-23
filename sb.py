@@ -71,3 +71,20 @@ def set_last_seen(account: str, last_tweet_id: str):
         body=[{"account": account, "last_tweet_id": str(last_tweet_id)}],
         headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
     )
+
+
+def get_approved_idol_info():
+    """承認済みの有志追記(idol_info)を取得。各 payload に idolSlug と links を含む。"""
+    _, rows = _request(
+        "GET",
+        "shared_items",
+        params={"select": "payload", "type": "eq.idol_info", "status": "eq.approved"},
+    )
+    return [r.get("payload", {}) for r in (rows or [])]
+
+
+def fetch_url_json(url: str):
+    """認証不要の公開JSON(catalog.json など)を取得する。"""
+    req = urllib.request.Request(url, headers={"User-Agent": "idollife-worker"})
+    with urllib.request.urlopen(req, timeout=30) as res:
+        return json.loads(res.read().decode("utf-8"))
