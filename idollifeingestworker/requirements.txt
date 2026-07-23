@@ -1,0 +1,5 @@
+twikit
+google-genai
+aiohttp
+beautifulsoup4
+pydantic
