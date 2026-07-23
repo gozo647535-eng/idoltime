@@ -2,7 +2,7 @@ name: Ingest ticket posts
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # 30分ごと(必要に応じて調整。最短は5分)
+    - cron: '0 */6 * * *' # 6時間ごと(UTC 0/6/12/18時)。無料枠に余裕を持たせる設定
   workflow_dispatch: {} # 手動実行も可能
 
 concurrency:
