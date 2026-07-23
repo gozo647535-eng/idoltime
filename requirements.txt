@@ -1,4 +1,7 @@
-twikit
+# 通常のPyPI版twikit(2.3.3)は2026/3/18のX変更でClientTransactionが壊れているため、
+# 修正が入ったコミュニティフォーク(phin/twikit)を使用する。
+# upstreamが修正版を出したら `twikit` に戻してよい。
+git+https://codeberg.org/phin/twikit.git
 google-genai
 aiohttp
 beautifulsoup4
