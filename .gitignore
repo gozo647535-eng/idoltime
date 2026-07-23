@@ -1,0 +1,10 @@
+# 機密ファイル(絶対にコミットしない)
+cookies.json
+config.json
+accounts.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.log

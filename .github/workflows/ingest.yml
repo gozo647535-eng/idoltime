@@ -1,0 +1,40 @@
+name: Ingest ticket posts
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # 30分ごと(必要に応じて調整。最短は5分)
+  workflow_dispatch: {} # 手動実行も可能
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore X session cookies
+        run: printf '%s' "$X_COOKIES_JSON" > cookies.json
+        env:
+          X_COOKIES_JSON: ${{ secrets.X_COOKIES_JSON }}
+      - name: Restore accounts list
+        run: printf '%s' "$ACCOUNTS_JSON" > accounts.json
+        env:
+          ACCOUNTS_JSON: ${{ secrets.ACCOUNTS_JSON }}
+      - name: Run worker
+        run: python worker.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # cookies.json が無効化された場合のフォールバック(任意)
+          X_USERNAME: ${{ secrets.X_USERNAME }}
+          X_EMAIL: ${{ secrets.X_EMAIL }}
+          X_PASSWORD: ${{ secrets.X_PASSWORD }}
