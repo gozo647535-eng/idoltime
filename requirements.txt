@@ -1,8 +1,8 @@
-# 通常のPyPI版twikit(2.3.3)は2026/3/18のX変更でClientTransactionが壊れているため、
-# 修正が入ったコミュニティフォーク(phin/twikit)を使用する。
-# upstreamが修正版を出したら `twikit` に戻してよい。
-git+https://codeberg.org/phin/twikit.git
 google-genai
-aiohttp
 beautifulsoup4
 pydantic
+
+# --- 補助: X取り込み(ENABLE_X_INGEST=1)を使う場合のみ有効化 ---
+# twikit は 2026/3 の X 変更以降不安定。使う場合は以下2行のコメントを外す。
+# aiohttp
+# git+https://codeberg.org/phin/twikit.git

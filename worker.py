@@ -1,9 +1,10 @@
 """IdolLife 取り込みワーカー
 
-図鑑に登録したアイドルの X アカウントを監視し、チケット投稿を Gemini(または
-正規表現フォールバック)で解析して Supabase の auto_events テーブルへ書き込む。
-元は Discord 通知ボット。解析ロジック(twikit 取得 / Gemini / Ticketdive スクレイプ /
-日時正規化 / 先着判定)はそのまま流用し、出力先のみ Supabase に変更している。
+主軸(既定): 図鑑に登録したアイドルの公式サイトを巡回し、チケット/イベント情報を
+Gemini で抽出して Supabase の auto_events テーブルへ書き込む(sites.py)。X より壊れにくい。
+
+補助(任意): 環境変数 ENABLE_X_INGEST=1 のときのみ、X(twikit)からの取り込みも実行する。
+※twikit は 2026/3 の X 変更以降不安定なため既定では無効。使う場合は requirements に twikit を戻す。
 
 GitHub Actions から定期実行される想定。既読位置(watermark)は Actions が揮発するため
 Supabase の worker_state テーブルに保存する。
@@ -16,16 +17,15 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import asyncio
 import datetime
+import hashlib
 import re
 import traceback
 from typing import List, Optional
 from pydantic import BaseModel, Field
-from twikit import Client
-import aiohttp
-from bs4 import BeautifulSoup
 
 import sb  # Supabase 入出力(標準ライブラリのみ)
-from watchlist import build_watch_list  # 図鑑連動の監視リスト生成
+import sites  # 公式サイトからの取得エンジン(主軸)
+from watchlist import build_site_watch_list, build_watch_list
 
 COOKIES_FILE = "cookies.json"
 
@@ -61,7 +61,7 @@ class ParsedTicketInfo(BaseModel):
     other_details: Optional[str] = Field(None, description="その他の詳細(会場名や注意事項等)")
 
 
-x_client = Client("en-US")
+x_client = None  # X取り込み有効時に run_x() で遅延生成
 
 # チケット販売サイトのドメイン断片(ツイート内リンクの判定に使用)
 # Ticketdive / e+(イープラス) / チケットぴあ / ローソンチケット / LivePocket / tiget(チゲット) など
@@ -167,6 +167,8 @@ def parse_ticket_info_fallback(text: str, urls: Optional[List[str]] = None) -> d
 async def scrape_ticketdive_page(url: str) -> Optional[dict]:
     if not url or ("ticketdive.com/event/" not in url and "t-dv.com/" not in url):
         return None
+    import aiohttp
+    from bs4 import BeautifulSoup
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
     try:
         async with aiohttp.ClientSession() as session:
@@ -332,16 +334,84 @@ async def check_account(username: str, idol_slug: str) -> int:
     return processed
 
 
-async def main() -> int:
+def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
+    """公式サイト由来の SiteEvent を auto_events 行に変換。tweet_id は合成した安定IDで重複排除。"""
+    if not ev.event_name:
+        return None
+    sale = None
+    if ev.sale_datetime:
+        sale = to_timestamptz(normalize_datetime_string(ev.sale_datetime) or ev.sale_datetime)
+    key = hashlib.sha1(
+        f"{slug}|{ev.event_name}|{ev.event_datetime}|{ev.sale_datetime}".encode("utf-8")
+    ).hexdigest()[:20]
+    return {
+        "tweet_id": f"site:{slug}:{key}",
+        "idol_slug": slug,
+        "account": None,
+        "event_name": ev.event_name,
+        "event_datetime": ev.event_datetime,
+        "sale_datetime": sale,
+        "is_first_come": bool(ev.is_first_come),
+        "ticket_url": ev.ticket_url,
+        "ticket_types": [t.model_dump() for t in ev.ticket_types],
+        "max_tickets": None,
+        "other_details": ev.venue,
+        "raw_text": None,
+        "tweet_url": site_url,
+    }
+
+
+def run_sites() -> int:
+    """公式サイトを巡回してイベント/チケット情報を取り込む(主軸)。"""
+    watch = build_site_watch_list()
+    if not watch:
+        print("公式サイトの監視対象がありません(図鑑に公式サイトURLが未登録の可能性)。")
+        return 0
+    print(f"公式サイト監視対象: {len(watch)} 件")
+    total = 0
+    for entry in watch:
+        slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
+        print(f"{name} の公式サイトを確認: {url}")
+        try:
+            content_hash, events = sites.fetch_site_events(gemini_client, slug, name, url)
+        except Exception as e:
+            print(f"  失敗: {e}")
+            continue
+        if content_hash is None:
+            continue
+        state_key = f"site:{slug}"
+        if sb.get_last_seen(state_key) == content_hash:
+            print("  変更なし。スキップ")
+            continue
+        count = 0
+        for ev in events:
+            row = build_site_row(slug, name, url, ev)
+            if row:
+                try:
+                    sb.upsert_auto_event(row)
+                    count += 1
+                except Exception as e:
+                    print(f"  書き込み失敗: {e}")
+        sb.set_last_seen(state_key, content_hash)
+        print(f"  {count} 件のイベントを反映")
+        total += count
+    print(f"公式サイト取り込み完了: 合計 {total} 件")
+    return total
+
+
+async def run_x() -> int:
+    """X(twikit)からの取り込み(補助・ENABLE_X_INGEST=1のときのみ)。"""
+    global x_client
+    from twikit import Client
+    x_client = Client("en-US")
     if not await login_x():
-        print("X ログイン不可のため終了。")
-        return 1
-    # 図鑑(catalog.json)+ 有志追記 + 手動リストから監視対象を自動生成
+        print("X ログイン不可。X取り込みをスキップ。")
+        return 0
     accounts = build_watch_list()
     if not accounts:
-        print("監視対象がありません(図鑑にXリンクが未登録の可能性)。")
+        print("X監視対象がありません。")
         return 0
-    print(f"監視対象: {len(accounts)} アカウント")
+    print(f"X監視対象: {len(accounts)} アカウント")
     total = 0
     for entry in accounts:
         try:
@@ -349,9 +419,16 @@ async def main() -> int:
         except Exception as e:
             print(f"{entry.get('handle')} の処理でエラー: {e}")
             traceback.print_exc()
-    print(f"完了。処理した新規投稿: {total} 件。")
+    print(f"X取り込み完了: {total} 件。")
+    return total
+
+
+def main() -> int:
+    run_sites()
+    if os.environ.get("ENABLE_X_INGEST") == "1":
+        asyncio.run(run_x())
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(main())
