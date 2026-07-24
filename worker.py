@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 import sb  # Supabase 入出力(標準ライブラリのみ)
 import sites  # 公式サイトからの取得エンジン(主軸)
 import timetree  # TimeTree 公開カレンダーからの取得エンジン
+import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
 from watchlist import build_site_watch_list, build_timetree_watch_list, build_watch_list
 
 COOKIES_FILE = "cookies.json"
@@ -257,6 +258,39 @@ def to_timestamptz(sale: Optional[str]) -> Optional[str]:
         return None
 
 
+# 同一実行内で同じ TicketDive ページを何度も取得しないための簡易キャッシュ
+_td_cache: dict = {}
+
+
+def enrich_row_with_ticketdive(row: dict) -> dict:
+    """row の ticket_url が TicketDive なら、構造化データで発売日時・先着・券種・会場を
+    補完/上書きする(TicketDive は販売元なので発売情報は最も正確・Gemini不要)。"""
+    url = row.get("ticket_url")
+    if not ticketdive.is_ticketdive_url(url):
+        return row
+    if url in _td_cache:
+        info = _td_cache[url]
+    else:
+        try:
+            info = ticketdive.fetch_ticketdive(url)
+        except Exception as e:
+            print(f"    TicketDive 補完失敗: {e}")
+            info = None
+        _td_cache[url] = info
+    if not info:
+        return row
+    if info.get("sale_datetime"):  # 販売元の日時を優先
+        row["sale_datetime"] = to_timestamptz(info["sale_datetime"])
+        row["is_first_come"] = bool(info.get("is_first_come"))
+    if info.get("ticket_types") and not row.get("ticket_types"):
+        row["ticket_types"] = info["ticket_types"]
+    if not row.get("event_datetime") and info.get("event_datetime"):
+        row["event_datetime"] = info["event_datetime"]
+    if not row.get("other_details") and info.get("venue"):
+        row["other_details"] = info["venue"]
+    return row
+
+
 def build_row(tweet, username: str, idol_slug: str, info: dict) -> dict:
     return {
         "tweet_id": str(tweet.id),
@@ -388,6 +422,7 @@ def run_sites() -> int:
         for ev in events:
             row = build_site_row(slug, name, url, ev)
             if row:
+                enrich_row_with_ticketdive(row)
                 try:
                     sb.upsert_auto_event(row)
                     count += 1
@@ -459,6 +494,7 @@ def run_timetree() -> int:
             ev["is_first_come"] = first_come
             row = build_timetree_row(slug, name, tt_url, ev)
             if row:
+                enrich_row_with_ticketdive(row)  # ticket_urlがTicketDiveなら構造化データで高精度化
                 try:
                     sb.upsert_auto_event(row)
                     count += 1
