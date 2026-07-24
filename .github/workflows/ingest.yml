@@ -2,7 +2,7 @@ name: Ingest ticket posts
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # 6時間ごと(UTC 0/6/12/18時)。無料枠に余裕を持たせる設定
+    - cron: '0 0 * * *' # 1日1回(UTC 0時 = JST 9時)。代行APIの無料枠/低コストに合わせた設定
   workflow_dispatch: {} # 手動実行も可能
 
 concurrency:

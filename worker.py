@@ -63,7 +63,16 @@ class ParsedTicketInfo(BaseModel):
 
 x_client = Client("en-US")
 
-TICKET_DOMAINS = ["ticket", "dive", "eplus", "livepocket", "t.livepocket", "pia", "l-tike", "t-dv.com"]
+# チケット販売サイトのドメイン断片(ツイート内リンクの判定に使用)
+# Ticketdive / e+(イープラス) / チケットぴあ / ローソンチケット / LivePocket / tiget(チゲット) など
+TICKET_DOMAINS = [
+    "ticket", "dive", "t-dv.com",          # Ticketdive
+    "eplus", "eplus.jp",                     # イープラス
+    "pia", "t.pia.jp",                       # チケットぴあ
+    "l-tike", "l-tike.com",                  # ローソンチケット
+    "livepocket", "t.livepocket",            # LivePocket
+    "tiget", "tiget.net",                    # チゲット
+]
 
 
 async def login_x() -> bool:
