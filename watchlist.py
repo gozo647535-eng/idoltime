@@ -102,6 +102,54 @@ def pick_official_site(links) -> Optional[str]:
     return None
 
 
+# TimeTree 公開カレンダーとみなすホスト/ラベル
+_TIMETREE_HOSTS = ("timetr.ee", "timetreeapp.com")
+_TIMETREE_LABELS = ("タイムツリー", "timetree", "time tree")
+
+
+def pick_timetree_url(links) -> Optional[str]:
+    """links から TimeTree 公開カレンダーのURLを選ぶ。ラベル一致 or ホスト一致。"""
+    for link in links or []:
+        label = (link.get("label") or "").lower()
+        url = link.get("url") or ""
+        if not url.startswith("http"):
+            continue
+        if any(l in label for l in _TIMETREE_LABELS):
+            return url
+        if any(h in url for h in _TIMETREE_HOSTS):
+            return url
+    return None
+
+
+def build_timetree_watch_list():
+    """図鑑カタログ + 有志追記から、TimeTree 監視対象 [{idol_slug, name, tt_url}] を作る。"""
+    seen = set()
+    watch = []
+
+    def add(slug, name, links):
+        if not slug or slug in seen:
+            return
+        url = pick_timetree_url(links)
+        if url:
+            watch.append({"idol_slug": slug, "name": name or slug, "tt_url": url})
+            seen.add(slug)
+
+    try:
+        catalog = sb.fetch_url_json(CATALOG_URL)
+        for idol in catalog.get("idols", []):
+            add(idol.get("slug"), idol.get("name"), idol.get("links", []))
+    except Exception as e:
+        print(f"catalog.json の取得に失敗(TimeTree・スキップ): {e}")
+
+    try:
+        for payload in sb.get_approved_idol_info():
+            add(payload.get("idolSlug"), payload.get("idolName"), payload.get("links", []))
+    except Exception as e:
+        print(f"idol_info の取得に失敗(TimeTree・スキップ): {e}")
+
+    return watch
+
+
 def build_site_watch_list():
     """図鑑カタログ + 有志追記から、公式サイト監視対象 [{idol_slug, name, site_url}] を作る。"""
     seen = set()

@@ -25,7 +25,8 @@ from pydantic import BaseModel, Field
 
 import sb  # Supabase 入出力(標準ライブラリのみ)
 import sites  # 公式サイトからの取得エンジン(主軸)
-from watchlist import build_site_watch_list, build_watch_list
+import timetree  # TimeTree 公開カレンダーからの取得エンジン
+from watchlist import build_site_watch_list, build_timetree_watch_list, build_watch_list
 
 COOKIES_FILE = "cookies.json"
 
@@ -399,6 +400,77 @@ def run_sites() -> int:
     return total
 
 
+def build_timetree_row(slug: str, name: str, tt_url: str, ev: dict) -> Optional[dict]:
+    """TimeTree の整形済みイベントを auto_events 行に変換。tweet_id は安定IDで重複排除。"""
+    if not ev.get("title"):
+        return None
+    sale = to_timestamptz(ev.get("sale_datetime"))
+    return {
+        "tweet_id": f"tt:{slug}:{ev['id']}",
+        "idol_slug": slug,
+        "account": None,
+        "event_name": ev["title"],
+        "event_datetime": ev.get("event_datetime"),
+        "sale_datetime": sale,
+        "is_first_come": bool(ev.get("is_first_come")),
+        "ticket_url": ev.get("ticket_url"),
+        "ticket_types": [],
+        "max_tickets": None,
+        "other_details": ev.get("venue"),
+        "raw_text": ev.get("note") or None,
+        "tweet_url": ev.get("page_url") or tt_url,
+    }
+
+
+def run_timetree() -> int:
+    """TimeTree 公開カレンダーを巡回してイベント/チケット情報を取り込む。"""
+    watch = build_timetree_watch_list()
+    if not watch:
+        print("TimeTree の監視対象がありません(図鑑にTimeTreeリンクが未登録)。")
+        return 0
+    print(f"TimeTree 監視対象: {len(watch)} 件")
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    total = 0
+    for entry in watch:
+        slug, name, tt_url = entry["idol_slug"], entry["name"], entry["tt_url"]
+        alias = timetree.extract_alias(tt_url)
+        if not alias:
+            print(f"{name}: TimeTree alias を解決できません({tt_url})")
+            continue
+        print(f"{name} の TimeTree を確認: {alias}")
+        try:
+            content_hash, events = timetree.fetch_public_events(alias)
+        except Exception as e:
+            print(f"  失敗: {e}")
+            continue
+        if content_hash is None:
+            continue
+        state_key = f"tt:{alias}"
+        if sb.get_last_seen(state_key) == content_hash:
+            print("  変更なし。スキップ")
+            continue
+        count = 0
+        for ev in events:
+            # メモにチケット発売情報があれば発売日時/先着を補完(Geminiは短文のみ)
+            sale_dt, first_come = timetree._parse_note_ticket(
+                gemini_client, ev["title"], ev.get("note") or "", today)
+            if sale_dt:
+                ev["sale_datetime"] = normalize_datetime_string(sale_dt) or sale_dt
+            ev["is_first_come"] = first_come
+            row = build_timetree_row(slug, name, tt_url, ev)
+            if row:
+                try:
+                    sb.upsert_auto_event(row)
+                    count += 1
+                except Exception as e:
+                    print(f"  書き込み失敗: {e}")
+        sb.set_last_seen(state_key, content_hash)
+        print(f"  {count} 件のイベントを反映")
+        total += count
+    print(f"TimeTree 取り込み完了: 合計 {total} 件")
+    return total
+
+
 async def run_x() -> int:
     """X(twikit)からの取り込み(補助・ENABLE_X_INGEST=1のときのみ)。"""
     global x_client
@@ -425,6 +497,7 @@ async def run_x() -> int:
 
 def main() -> int:
     run_sites()
+    run_timetree()
     if os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())
     return 0
