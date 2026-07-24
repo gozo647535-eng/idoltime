@@ -279,6 +279,11 @@ def enrich_row_with_ticketdive(row: dict) -> dict:
         _td_cache[url] = info
     if not info:
         return row
+    # 名前が汎用的("ライブ予定"等)/空なら販売元の正式名で上書き
+    if info.get("event_name") and (
+        not row.get("event_name") or timetree.looks_placeholder(row["event_name"])
+    ):
+        row["event_name"] = info["event_name"]
     if info.get("sale_datetime"):  # 販売元の日時を優先
         row["sale_datetime"] = to_timestamptz(info["sale_datetime"])
         row["is_first_come"] = bool(info.get("is_first_come"))
@@ -485,6 +490,8 @@ def run_timetree() -> int:
             print("  変更なし。スキップ")
             continue
         count = 0
+        removed = 0
+        emitted_ids = set()
         for ev in events:
             # メモにチケット発売情報があれば発売日時/先着を補完(正規表現優先・取れない時だけGemini)
             sale_dt, first_come = timetree.extract_note_ticket(
@@ -497,11 +504,20 @@ def run_timetree() -> int:
                 enrich_row_with_ticketdive(row)  # ticket_urlがTicketDiveなら構造化データで高精度化
                 try:
                     sb.upsert_auto_event(row)
+                    emitted_ids.add(row["tweet_id"])
                     count += 1
                 except Exception as e:
                     print(f"  書き込み失敗: {e}")
+        # 再突合: 今回出力しなかった過去のtt行(過去イベント・削除済み・プレースホルダ等)を掃除
+        try:
+            for old_id in sb.get_auto_event_ids(slug, prefix=f"tt:{slug}:"):
+                if old_id not in emitted_ids:
+                    sb.delete_auto_event(old_id)
+                    removed += 1
+        except Exception as e:
+            print(f"  再突合(削除)でエラー: {e}")
         sb.set_last_seen(state_key, content_hash)
-        print(f"  {count} 件のイベントを反映")
+        print(f"  {count} 件反映 / {removed} 件削除")
         total += count
     print(f"TimeTree 取り込み完了: 合計 {total} 件")
     return total

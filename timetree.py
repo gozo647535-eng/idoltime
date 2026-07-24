@@ -33,6 +33,40 @@ EXTRACT_VERSION = "v3"
 # チケット関連のメモか判定するキーワード
 _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", "販売", "先着")
 
+# --- イベント名の整形/プレースホルダ判定 ---
+# 前後の絵文字・記号を落として表示用の芯を取り出す(\w はPython3では日本語も含む)
+_NAME_HEAD = re.compile(r"^[^\w【（「『]+")
+_NAME_TAIL = re.compile(r"[^\w】）」』!?！？]+$")
+# メモ内の 「」『』 に囲まれた実イベント名
+_QUOTED_RE = re.compile(r"[「『]([^」』\n]{3,50})[」』]")
+# 実体名の無い"予定"系プレースホルダ(例: ライブ予定 / 重要イベント予定 / 大阪遠征 / 遠征予定)
+_PLACEHOLDER_RE = re.compile(r"^(?:重要)?(?:LIVE|ライブ|イベント|ワンマン)?(?:予定|未定)$", re.IGNORECASE)
+_TABI_RE = re.compile(r"^.{0,5}遠征(?:予定)?$")
+_PLACEHOLDER_WORDS = {"ライブ", "live", "出演", "イベント", "予定", "未定", "tba"}
+
+
+def _core_name(title: str) -> str:
+    """前後の絵文字・装飾記号を除いた表示用イベント名。"""
+    t = _NAME_TAIL.sub("", _NAME_HEAD.sub("", title or ""))
+    return t.strip()
+
+
+def looks_placeholder(title: str) -> bool:
+    """実イベント名を持たない汎用的な"予定"表記なら True。"""
+    core = _core_name(title)
+    body = re.sub(r"[（(【][^）)】]*[）)】]", "", core).strip()  # (出演日未定)等の括弧書きを除く
+    norm = re.sub(r"\s|　", "", body)
+    if not norm:
+        return True
+    if norm.lower() in _PLACEHOLDER_WORDS:
+        return True
+    return bool(_PLACEHOLDER_RE.match(norm) or _TABI_RE.match(norm))
+
+
+def _title_from_note(note: str):
+    m = _QUOTED_RE.search(note or "")
+    return m.group(1).strip() if m else None
+
 # 発売/受付日時を表す語。この直後に M/D [HH:MM] が続く書式を正規表現で拾う。
 _SALE_KW = r"(?:先着発売|一般発売|一般販売|先行発売|発売|受付開始|受付|先行|抽選|販売開始|申込開始)"
 _SALE_RE = re.compile(
@@ -218,12 +252,23 @@ def fetch_public_events(alias: str):
         d = _event_date_only(ev)
         if d is None or d < today:  # 過去は除外
             continue
-        title = (ev.get("title") or "").strip()
-        if not title:
+        raw_title = (ev.get("title") or "").strip()
+        if not raw_title:
             continue
         note = ev.get("note") or ""
-        venue = (ev.get("location_name") or ev.get("location_address") or "").strip() or None
         ticket_url = _ticket_url_from_note(note) or (ev.get("link_url") or "").strip() or None
+        # イベント名の整形: 絵文字/装飾を除去。プレースホルダ(「ライブ予定」等)は
+        # メモの引用名で補完し、それも無く手掛かりが無ければ取り込まない。
+        title = _core_name(raw_title) or raw_title
+        if looks_placeholder(raw_title):
+            quoted = _title_from_note(note)
+            if quoted:
+                title = quoted
+            elif not ticket_url:
+                # 実体名もチケットも無い漠然とした予定 → ノイズなのでスキップ
+                continue
+            # チケットがあれば残す(TicketDive補完で正式名が入る)
+        venue = (ev.get("location_name") or ev.get("location_address") or "").strip() or None
         events.append({
             "id": str(ev.get("id")),
             "title": title,

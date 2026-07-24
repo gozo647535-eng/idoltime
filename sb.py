@@ -50,6 +50,26 @@ def upsert_auto_event(row: dict):
     )
 
 
+def get_auto_event_ids(idol_slug: str, prefix: str = "tt:"):
+    """指定アイドルの、prefix で始まる tweet_id 一覧を返す(再突合による削除用)。"""
+    _, rows = _request(
+        "GET",
+        "auto_events",
+        params={"select": "tweet_id", "idol_slug": f"eq.{idol_slug}", "tweet_id": f"like.{prefix}*"},
+    )
+    return [r["tweet_id"] for r in (rows or [])]
+
+
+def delete_auto_event(tweet_id: str):
+    """tweet_id を指定して auto_events の1行を削除する。"""
+    _request(
+        "DELETE",
+        "auto_events",
+        params={"tweet_id": f"eq.{tweet_id}"},
+        headers={"Prefer": "return=minimal"},
+    )
+
+
 def get_last_seen(account: str):
     """worker_state から前回既読ツイートIDを取得(無ければ None)。"""
     _, rows = _request(
