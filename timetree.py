@@ -26,8 +26,17 @@ API_HEADER = {"X-TimeTreeA": "web/1.0.0/ja", "User-Agent": UA, "Accept": "applic
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
 
+# メモ抽出ロジックを変えたらこの値を上げる(既読カレンダーの再処理をトリガー)
+EXTRACT_VERSION = "v2"
+
 # チケット関連のメモか判定するキーワード
 _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", "販売", "先着")
+
+# 発売/受付日時を表す語。この直後に M/D [HH:MM] が続く書式を正規表現で拾う。
+_SALE_KW = r"(?:先着発売|一般発売|一般販売|先行発売|発売|受付開始|受付|先行|抽選|販売開始|申込開始)"
+_SALE_RE = re.compile(
+    _SALE_KW + r"[^\d\n]{0,8}(\d{1,2})[/月](\d{1,2})(?:日)?[^\d\n]{0,6}(?:(\d{1,2})[:：](\d{2}))?"
+)
 # メモ本文からチケットURLを拾う(短縮ドメインも含む)
 _TICKET_URL_RE = re.compile(
     r"https?://[^\s　]*(?:ticketdive\.com|t-dv\.com|eplus\.jp|t\.pia\.jp|pia\.jp|"
@@ -120,10 +129,32 @@ class NoteTicket(BaseModel):
     is_first_come: bool = Field(False, description="先着/一般発売(先着)なら True。抽選・先行(抽選)は False")
 
 
-def _parse_note_ticket(gemini_client, title: str, note: str, today: str):
-    """メモにチケット発売情報が含まれる場合のみ Gemini で発売日時/先着を抽出。
-    返り値 (sale_datetime_str|None, is_first_come_bool)。"""
-    if not gemini_client or not note or not any(k in note for k in _TICKET_KW):
+def _regex_note_ticket(note: str, today: datetime.date):
+    """メモ本文から発売日時と先着判定を正規表現で抽出(無料・Gemini不要)。
+    返り値 (sale_datetime_str|None 'YYYY-MM-DD HH:MM:SS', is_first_come_bool)。"""
+    has_fc = ("先着" in note) or ("一般発売" in note) or ("一般販売" in note)
+    has_lot = "抽選" in note  # 抽選が絡むなら先着扱いにしない
+    is_fc = has_fc and not has_lot
+    m = _SALE_RE.search(note)
+    if not m:
+        return None, is_fc
+    mo, d, h, mi = m.groups()
+    try:
+        cand = datetime.date(today.year, int(mo), int(d))
+    except ValueError:
+        return None, is_fc
+    # 年跨ぎ対策: 極端に過去なら翌年とみなす(12月→1月など)
+    if cand < today - datetime.timedelta(days=60):
+        cand = cand.replace(year=today.year + 1)
+    h = int(h) if h else 0
+    mi = int(mi) if mi else 0
+    return f"{cand.isoformat()} {h:02d}:{mi:02d}:00", is_fc
+
+
+def _gemini_note_ticket(gemini_client, title: str, note: str, today: str):
+    """正規表現で取れなかった場合のフォールバック。Gemini で発売日時を抽出。
+    クォータ切れ等で失敗しても (None, False) を返すだけで害はない。"""
+    if not gemini_client:
         return None, False
     from google.genai import types
 
@@ -145,8 +176,22 @@ def _parse_note_ticket(gemini_client, title: str, note: str, today: str):
         nt = res.parsed
         return nt.sale_datetime, bool(nt.is_first_come)
     except Exception as e:
-        print(f"    TimeTree メモ解析失敗: {e}")
+        print(f"    TimeTree メモGemini解析失敗(正規表現の結果を使用): {e}")
         return None, False
+
+
+def extract_note_ticket(gemini_client, title: str, note: str, today: str):
+    """メモから発売日時/先着を抽出。まず正規表現(無料)、取れなければGeminiで補完。
+    返り値 (sale_datetime_str|None, is_first_come_bool)。today は 'YYYY-MM-DD'。"""
+    if not note or not any(k in note for k in _TICKET_KW):
+        return None, False
+    today_date = datetime.date.fromisoformat(today)
+    sale, is_fc = _regex_note_ticket(note, today_date)
+    if sale:  # 正規表現で取れたら Gemini は呼ばない(コスト節約・クォータ非依存)
+        return sale, is_fc
+    # 取れない時だけ Gemini にフォールバック
+    g_sale, g_fc = _gemini_note_ticket(gemini_client, title, note, today)
+    return g_sale, (is_fc or g_fc)
 
 
 def fetch_public_events(alias: str):
@@ -163,7 +208,7 @@ def fetch_public_events(alias: str):
         return None, []
     raw = payload.get("public_events") or []
     content_hash = hashlib.sha1(
-        (alias + "\n" + json.dumps(raw, ensure_ascii=False, sort_keys=True)).encode("utf-8", "ignore")
+        (EXTRACT_VERSION + "\n" + alias + "\n" + json.dumps(raw, ensure_ascii=False, sort_keys=True)).encode("utf-8", "ignore")
     ).hexdigest()
 
     today = datetime.datetime.now(JST).date()

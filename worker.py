@@ -451,8 +451,8 @@ def run_timetree() -> int:
             continue
         count = 0
         for ev in events:
-            # メモにチケット発売情報があれば発売日時/先着を補完(Geminiは短文のみ)
-            sale_dt, first_come = timetree._parse_note_ticket(
+            # メモにチケット発売情報があれば発売日時/先着を補完(正規表現優先・取れない時だけGemini)
+            sale_dt, first_come = timetree.extract_note_ticket(
                 gemini_client, ev["title"], ev.get("note") or "", today)
             if sale_dt:
                 ev["sale_datetime"] = normalize_datetime_string(sale_dt) or sale_dt
