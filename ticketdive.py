@@ -109,6 +109,17 @@ def fetch_ticketdive(url: str) -> Optional[dict]:
             price_str = f"{price:,}円" if isinstance(price, (int, float)) else (str(price) if price else "")
             ticket_types.append({"name": name, "price": price_str})
 
+    # 複数日開催の場合、各ステージ(DAY1/DAY2…)の日付と出演者一覧
+    day_stages = []
+    for st in stages:
+        dt = _iso_to_jst(st.get("startStage"), with_time=False)
+        date = dt[:10] if dt else None
+        if date:
+            day_stages.append({
+                "date": date,
+                "artists": [a.get("name") for a in (st.get("artists") or []) if a.get("name")],
+            })
+
     return {
         "event_name": event.get("name"),
         "venue": venue,
@@ -118,4 +129,32 @@ def fetch_ticketdive(url: str) -> Optional[dict]:
         "is_first_come": is_first_come,
         "ticket_types": ticket_types,
         "artists": [a.get("name") for a in (stage.get("artists") or []) if a.get("name")],
+        "day_stages": day_stages,
     }
+
+
+def festival_key(url: str) -> str:
+    """TicketDive URL からイベント識別子(最後のパスセグメント)を取り出す。"""
+    seg = (url or "").rstrip("/").split("/")[-1].split("?")[0]
+    return seg or "event"
+
+
+def _norm_name(s: str) -> str:
+    return re.sub(r"[\s　・:：!！?？★☆.\-〜~／/（）()]", "", (s or "")).lower()
+
+
+def match_idol_days(day_stages, idol_name: str):
+    """day_stages の各日出演者から、idol_name が出演する日付(YYYY-MM-DD)を昇順で返す。"""
+    key = _norm_name(idol_name)
+    if not key:
+        return []
+    dates = set()
+    for ds in day_stages:
+        for a in ds.get("artists") or []:
+            na = _norm_name(a)
+            if not na:
+                continue
+            if na == key or (len(key) >= 5 and key in na) or (len(na) >= 5 and na in key):
+                dates.add(ds["date"])
+                break
+    return sorted(dates)

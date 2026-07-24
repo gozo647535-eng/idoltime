@@ -262,21 +262,58 @@ def to_timestamptz(sale: Optional[str]) -> Optional[str]:
 _td_cache: dict = {}
 
 
+def _td_info(url):
+    if url in _td_cache:
+        return _td_cache[url]
+    try:
+        info = ticketdive.fetch_ticketdive(url)
+    except Exception as e:
+        print(f"    TicketDive 取得失敗: {e}")
+        info = None
+    _td_cache[url] = info
+    return info
+
+
+_UNDECIDED_RE = re.compile(r"[（(][^）)]*未定[^）)]*[）)]")
+
+
+def expand_timetree_row(row: dict, idol_name: str):
+    """ticket_url が複数日開催の TicketDive フェスなら、そのアイドルが実際に出演する
+    日ごとの行に分割する(出演日をTicketDiveの日別ラインナップから確定)。
+    単日 or マッチしなければ [row] のまま。"""
+    url = row.get("ticket_url")
+    if not ticketdive.is_ticketdive_url(url):
+        return [row]
+    info = _td_info(url)
+    if not info:
+        return [row]
+    day_stages = info.get("day_stages") or []
+    if len({d["date"] for d in day_stages}) <= 1:  # 単日イベント
+        return [row]
+    days = ticketdive.match_idol_days(day_stages, idol_name)
+    if not days:  # ラインナップに見つからなければ元の行を維持
+        return [row]
+    fk = ticketdive.festival_key(url)
+    name = info.get("event_name") or _UNDECIDED_RE.sub("", row.get("event_name") or "").strip()
+    out = []
+    for dt in days:
+        r = dict(row)
+        r["ticket_types"] = list(row.get("ticket_types") or [])
+        r["event_name"] = name
+        r["event_datetime"] = dt
+        # フェス識別子+日付でIDを作る → 同一フェスの複数TimeTree投稿でも1日1行に集約
+        r["tweet_id"] = f"tt:{row['idol_slug']}:tdf:{fk}:{dt.replace('-', '')}"
+        out.append(r)
+    return out
+
+
 def enrich_row_with_ticketdive(row: dict) -> dict:
     """row の ticket_url が TicketDive なら、構造化データで発売日時・先着・券種・会場を
     補完/上書きする(TicketDive は販売元なので発売情報は最も正確・Gemini不要)。"""
     url = row.get("ticket_url")
     if not ticketdive.is_ticketdive_url(url):
         return row
-    if url in _td_cache:
-        info = _td_cache[url]
-    else:
-        try:
-            info = ticketdive.fetch_ticketdive(url)
-        except Exception as e:
-            print(f"    TicketDive 補完失敗: {e}")
-            info = None
-        _td_cache[url] = info
+    info = _td_info(url)
     if not info:
         return row
     # 名前が汎用的("ライブ予定"等)/空なら販売元の正式名で上書き
@@ -501,13 +538,15 @@ def run_timetree() -> int:
             ev["is_first_come"] = first_come
             row = build_timetree_row(slug, name, tt_url, ev)
             if row:
-                enrich_row_with_ticketdive(row)  # ticket_urlがTicketDiveなら構造化データで高精度化
-                try:
-                    sb.upsert_auto_event(row)
-                    emitted_ids.add(row["tweet_id"])
-                    count += 1
-                except Exception as e:
-                    print(f"  書き込み失敗: {e}")
+                # 複数日フェスは出演日ごとに分割してから、各行をTicketDiveで高精度化
+                for r in expand_timetree_row(row, name):
+                    enrich_row_with_ticketdive(r)
+                    try:
+                        sb.upsert_auto_event(r)
+                        emitted_ids.add(r["tweet_id"])
+                        count += 1
+                    except Exception as e:
+                        print(f"  書き込み失敗: {e}")
         # 再突合: 今回出力しなかった過去のtt行(過去イベント・削除済み・プレースホルダ等)を掃除
         try:
             for old_id in sb.get_auto_event_ids(slug, prefix=f"tt:{slug}:"):

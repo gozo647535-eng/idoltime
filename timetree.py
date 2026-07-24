@@ -28,7 +28,7 @@ JST = datetime.timezone(datetime.timedelta(hours=9))
 
 # メモ抽出ロジックを変えたらこの値を上げる(既読カレンダーの再処理をトリガー)
 # v3: TicketDive 構造化データによる補完を追加
-EXTRACT_VERSION = "v3"
+EXTRACT_VERSION = "v4"
 
 # チケット関連のメモか判定するキーワード
 _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", "販売", "先着")
