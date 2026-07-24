@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
+# 抽出プロンプトを変更したらこの値を上げる(既読サイトの再抽出をトリガーする)
+PROMPT_VERSION = "v2"
+
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
 SUBPAGE_KEYWORDS = [
     "news", "schedule", "live", "ticket", "event", "information", "info",
@@ -95,13 +98,18 @@ class SiteExtraction(BaseModel):
 def extract_events(gemini_client, name: str, text: str) -> List[SiteEvent]:
     if not gemini_client or not text.strip():
         return []
+    import datetime
     from google.genai import types
 
-    prompt = f"""以下は「{name}」の公式サイトのテキストです。
-今後開催されるライブ/イベントのうち、チケットの発売・受付・先行に関する情報が読み取れるものだけを、正確なJSONで抽出してください。
-- すでに終了した公演、開催日が全く不明なものは含めない
-- sale_datetime は分かる場合のみ 'YYYY-MM-DD HH:MM:SS' 形式で
-- 情報が無ければ events は空配列
+    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d")
+    prompt = f"""以下は「{name}」の公式サイトのテキストです。本日は {today}(JST)です。
+今後のライブ/イベントで、チケットの発売・受付・先行・抽選申込に関する情報を、正確なJSONで抽出してください。
+
+厳守事項:
+- 開催日または発売/受付日が {today} より前の、すでに終了したものは**絶対に含めない**(過去の公演・終了した受付は除外)
+- チケットの購入・申込に関係しないもの(グッズ販売、写真集発売、動画公開など)は含めない
+- sale_datetime(発売/受付/抽選申込の開始または締切の日時)は分かる場合のみ 'YYYY-MM-DD HH:MM:SS' 形式。年が不明なら {today[:4]} を補完
+- 該当が無ければ events は空配列にする
 
 【公式サイト本文】
 {text[:15000]}"""
@@ -135,6 +143,7 @@ def fetch_site_events(gemini_client, idol_slug: str, name: str, site_url: str):
         if h:
             texts.append(_html_to_text(h))
     combined = "\n\n".join(texts)
-    content_hash = hashlib.sha1(combined.encode("utf-8", "ignore")).hexdigest()
+    # PROMPT_VERSION を含めることで、抽出プロンプトを更新したら再抽出が走る
+    content_hash = hashlib.sha1((PROMPT_VERSION + "\n" + combined).encode("utf-8", "ignore")).hexdigest()
     events = extract_events(gemini_client, name, combined)
     return content_hash, events
