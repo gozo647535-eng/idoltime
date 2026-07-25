@@ -328,18 +328,23 @@ def enrich_row_with_ticketdive(row: dict) -> dict:
         row["ticket_types"] = info["ticket_types"]
     if not row.get("event_datetime") and info.get("event_datetime"):
         row["event_datetime"] = info["event_datetime"]
+    if not row.get("open_time") and info.get("open_time"):
+        row["open_time"] = info["open_time"]
     if not row.get("other_details") and info.get("venue"):
         row["other_details"] = info["venue"]
     return row
 
 
 def build_row(tweet, username: str, idol_slug: str, info: dict) -> dict:
+    open_t, entry_t = timetree.extract_open_entry(tweet.text)
     return {
         "tweet_id": str(tweet.id),
         "idol_slug": idol_slug,
         "account": username,
         "event_name": info.get("event_name"),
         "event_datetime": info.get("event_datetime"),
+        "open_time": open_t,
+        "entry_time": entry_t,
         "sale_datetime": to_timestamptz(info.get("sale_datetime")),
         "is_first_come": bool(info.get("is_first_come")),
         "ticket_url": info.get("ticket_url"),
@@ -427,6 +432,8 @@ def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
         "account": None,
         "event_name": ev.event_name,
         "event_datetime": ev.event_datetime,
+        "open_time": ev.open_time,
+        "entry_time": ev.entry_time,
         "sale_datetime": sale,
         "is_first_come": bool(ev.is_first_come),
         "ticket_url": ev.ticket_url,
@@ -482,12 +489,15 @@ def build_timetree_row(slug: str, name: str, tt_url: str, ev: dict) -> Optional[
     if not ev.get("title"):
         return None
     sale = to_timestamptz(ev.get("sale_datetime"))
+    open_t, entry_t = timetree.extract_open_entry(ev.get("note") or "")
     return {
         "tweet_id": f"tt:{slug}:{ev['id']}",
         "idol_slug": slug,
         "account": None,
         "event_name": ev["title"],
         "event_datetime": ev.get("event_datetime"),
+        "open_time": open_t,
+        "entry_time": entry_t,
         "sale_datetime": sale,
         "is_first_come": bool(ev.get("is_first_come")),
         "ticket_url": ev.get("ticket_url"),

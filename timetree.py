@@ -28,7 +28,8 @@ JST = datetime.timezone(datetime.timedelta(hours=9))
 
 # メモ抽出ロジックを変えたらこの値を上げる(既読カレンダーの再処理をトリガー)
 # v3: TicketDive 構造化データによる補完を追加
-EXTRACT_VERSION = "v4"
+# v5: メモから開場/入場時刻(open_time/entry_time)を抽出
+EXTRACT_VERSION = "v5"
 
 # チケット関連のメモか判定するキーワード
 _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", "販売", "先着")
@@ -82,6 +83,36 @@ _TICKET_URL_RE = re.compile(
 _TICKET_URL_BARE_RE = re.compile(
     r"(?<![\w/])(?:t-dv\.com|tiget\.net|l-tike\.com)/[^\s　]+", re.IGNORECASE
 )
+
+
+# 開場/入場時刻を自由文から拾う(「開場18:00」「開場 18時00分」「開場:18:00」等)
+_OPEN_TIME_RE = re.compile(r"開場\s*[:：]?\s*(\d{1,2})\s*[:：時]\s*(\d{2})")
+_ENTRY_TIME_RE = re.compile(r"入場\s*[:：]?\s*(\d{1,2})\s*[:：時]\s*(\d{2})")
+
+
+def _fmt_hhmm(m) -> Optional[str]:
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h > 29 or mi > 59:
+        return None
+    return f"{h:02d}:{mi:02d}"
+
+
+def extract_open_entry(*texts: Optional[str]):
+    """テキスト群から開場/入場時刻(HH:MM)を拾う。見つからなければ None。
+    返り値 (open_time|None, entry_time|None)。複数ソース(メモ・本文)を順に見る。"""
+    open_t = entry_t = None
+    for t in texts:
+        if not t:
+            continue
+        if open_t is None:
+            open_t = _fmt_hhmm(_OPEN_TIME_RE.search(t))
+        if entry_t is None:
+            entry_t = _fmt_hhmm(_ENTRY_TIME_RE.search(t))
+        if open_t and entry_t:
+            break
+    return open_t, entry_t
 
 
 def _get(url: str, timeout: int = 20) -> Optional[bytes]:

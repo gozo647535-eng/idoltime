@@ -97,6 +97,11 @@ def fetch_ticketdive(url: str) -> Optional[dict]:
     if venue and venue_obj.get("address"):
         venue = f"{venue}({venue_obj['address']})"
 
+    # 開場時刻(あれば)。フィールド名は環境によって異なるため複数候補を見る。
+    open_iso = stage.get("openStage") or stage.get("doorOpen") or stage.get("doorOpenAt")
+    open_dt = _iso_to_jst(open_iso, with_time=True)
+    open_time = open_dt[11:16] if open_dt else None
+
     ti = _pick_ticket_info(ed.get("ticketInfoList") or [])
     sale_dt = _iso_to_jst(ti.get("startApply") or ti.get("release")) if ti else None
     sale_end = _iso_to_jst(ti.get("endApply")) if ti else None
@@ -124,6 +129,7 @@ def fetch_ticketdive(url: str) -> Optional[dict]:
         "event_name": event.get("name"),
         "venue": venue,
         "event_datetime": _iso_to_jst(stage.get("startStage"), with_time=True),
+        "open_time": open_time,
         "sale_datetime": sale_dt,
         "sale_end": sale_end,
         "is_first_come": is_first_come,

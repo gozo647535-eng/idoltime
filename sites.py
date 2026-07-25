@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 # 抽出プロンプトを変更したらこの値を上げる(既読サイトの再抽出をトリガーする)
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
 SUBPAGE_KEYWORDS = [
@@ -80,7 +80,9 @@ class TicketType(BaseModel):
 
 class SiteEvent(BaseModel):
     event_name: str = Field(description="イベント名/公演名")
-    event_datetime: Optional[str] = Field(None, description="公演日時 (例: 2026/08/20 18:30)")
+    event_datetime: Optional[str] = Field(None, description="公演日時/開演時刻 (例: 2026/08/20 18:30)")
+    open_time: Optional[str] = Field(None, description="開場時刻。分かる場合のみ 'HH:MM' (例: 18:00)")
+    entry_time: Optional[str] = Field(None, description="入場時刻。開場と別に指定がある場合のみ 'HH:MM'")
     sale_datetime: Optional[str] = Field(
         None,
         description="チケット発売/受付/先行の開始日時。分かる場合のみ 'YYYY-MM-DD HH:MM:SS'(年不明なら現在の年、秒は00)",
@@ -109,6 +111,7 @@ def extract_events(gemini_client, name: str, text: str) -> List[SiteEvent]:
 - 開催日または発売/受付日が {today} より前の、すでに終了したものは**絶対に含めない**(過去の公演・終了した受付は除外)
 - チケットの購入・申込に関係しないもの(グッズ販売、写真集発売、動画公開など)は含めない
 - sale_datetime(発売/受付/抽選申込の開始または締切の日時)は分かる場合のみ 'YYYY-MM-DD HH:MM:SS' 形式。年が不明なら {today[:4]} を補完
+- open_time(開場時刻)・entry_time(入場時刻)は本文に明記がある場合のみ 'HH:MM' 形式で入れる(無ければ null)
 - 該当が無ければ events は空配列にする
 
 【公式サイト本文】
