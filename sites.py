@@ -16,12 +16,15 @@ from pydantic import BaseModel, Field
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 # 抽出プロンプトを変更したらこの値を上げる(既読サイトの再抽出をトリガーする)
-PROMPT_VERSION = "v3"
+# v4: チケット無しの公演/ライブ出演予定も網羅対象に(イベント情報の取りこぼしを減らす)
+PROMPT_VERSION = "v4"
 
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
 SUBPAGE_KEYWORDS = [
     "news", "schedule", "live", "ticket", "event", "information", "info",
+    "tour", "oneman", "calendar", "concert", "gig",
     "スケジュール", "ニュース", "ライブ", "チケット", "イベント", "公演", "お知らせ",
+    "ツアー", "ワンマン", "出演", "カレンダー", "日程",
 ]
 
 
@@ -58,7 +61,7 @@ def _html_to_text(html: str) -> str:
 
 
 def _find_subpages(html: str, base_url: str) -> List[str]:
-    """News/Schedule 等の同一ドメイン内サブページURLを最大2件返す。"""
+    """News/Schedule 等の同一ドメイン内サブページURLを最大3件返す。"""
     soup = BeautifulSoup(html, "html.parser")
     base_host = urlparse(base_url).netloc
     found: List[str] = []
@@ -68,7 +71,7 @@ def _find_subpages(html: str, base_url: str) -> List[str]:
             full = urljoin(base_url, a["href"])
             if urlparse(full).netloc == base_host and full not in found and full != base_url:
                 found.append(full)
-        if len(found) >= 2:
+        if len(found) >= 3:
             break
     return found
 
@@ -105,13 +108,15 @@ def extract_events(gemini_client, name: str, text: str) -> List[SiteEvent]:
 
     today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d")
     prompt = f"""以下は「{name}」の公式サイトのテキストです。本日は {today}(JST)です。
-今後のライブ/イベントで、チケットの発売・受付・先行・抽選申込に関する情報を、正確なJSONで抽出してください。
+このグループが**今後出演するライブ・イベント(公演)**を、正確なJSONで網羅的に抽出してください。チケット情報の有無に関わらず、開催日が特定できる出演予定はすべて拾ってください。
 
 厳守事項:
-- 開催日または発売/受付日が {today} より前の、すでに終了したものは**絶対に含めない**(過去の公演・終了した受付は除外)
-- チケットの購入・申込に関係しないもの(グッズ販売、写真集発売、動画公開など)は含めない
-- sale_datetime(発売/受付/抽選申込の開始または締切の日時)は分かる場合のみ 'YYYY-MM-DD HH:MM:SS' 形式。年が不明なら {today[:4]} を補完
-- open_time(開場時刻)・entry_time(入場時刻)は本文に明記がある場合のみ 'HH:MM' 形式で入れる(無ければ null)
+- 開催日が {today} より前の、すでに終了した公演は**絶対に含めない**(過去の公演は除外)
+- event_datetime(公演日時)は必須。'YYYY-MM-DD HH:MM' か、時刻不明なら 'YYYY-MM-DD'。年が不明なら {today[:4]} を補完(月日が過去なら翌年)
+- **実際のライブ/イベント出演のみ**。グッズ・写真集・CD/配信リリース・MV/動画公開・TV/ラジオ/雑誌などの露出情報は含めない
+- チケットが分かる場合のみ: sale_datetime(発売/受付/先行/抽選申込の開始日時)は 'YYYY-MM-DD HH:MM:SS' 形式、is_first_come、ticket_types、ticket_url を埋める。無ければ null/空でよい
+- open_time(開場)・entry_time(入場)は本文に明記がある場合のみ 'HH:MM'(無ければ null)
+- venue(会場)は分かれば入れる。同じ公演を重複させない
 - 該当が無ければ events は空配列にする
 
 【公式サイト本文】

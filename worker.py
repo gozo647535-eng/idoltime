@@ -104,22 +104,76 @@ async def login_x() -> bool:
         return False
 
 
+_FULLWIDTH = str.maketrans("０１２３４５６７８９：／－．", "0123456789:/-.")
+
+
+def _zen2han(s: Optional[str]) -> Optional[str]:
+    """全角数字・コロンを半角へ。日時パースの取りこぼしを減らす。"""
+    return s.translate(_FULLWIDTH) if s else s
+
+
 def normalize_datetime_string(raw_text: str) -> Optional[str]:
     if not raw_text:
         return None
     try:
-        m = re.search(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})[日\s]*[^\d\s]*\s*(\d{1,2})[：:](\d{1,2})", raw_text)
+        t = _zen2han(raw_text)
+        # YYYY(年/-/.) MM DD [HH:MM](分・区切りは緩め。「時」表記や分省略にも対応)
+        m = re.search(r"(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})[日\s]*[^\d\s]*\s*(\d{1,2})[：:時](\d{1,2})?", t)
         if m:
             y, mo, d, h, mi = m.groups()
-            return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {int(h):02d}:{int(mi):02d}:00"
-        m = re.search(r"(\d{1,2})[-/月](\d{1,2})[日\s]*[^\d\s]*\s*(\d{1,2})[：:](\d{1,2})", raw_text)
+            return f"{int(y):04d}-{int(mo):02d}-{int(d):02d} {int(h):02d}:{int(mi or 0):02d}:00"
+        # 年なし MM/DD [HH:MM] → 当年補完 + 年跨ぎ対策(過去すぎれば翌年)
+        m = re.search(r"(\d{1,2})[-/月.](\d{1,2})[日\s]*[^\d\s]*\s*(\d{1,2})[：:時](\d{1,2})?", t)
         if m:
             mo, d, h, mi = m.groups()
-            y = datetime.datetime.now().year
-            return f"{y:04d}-{int(mo):02d}-{int(d):02d} {int(h):02d}:{int(mi):02d}:00"
+            today = datetime.datetime.now(JST).date()
+            try:
+                cand = datetime.date(today.year, int(mo), int(d))
+            except ValueError:
+                return None
+            if cand < today - datetime.timedelta(days=60):
+                cand = cand.replace(year=today.year + 1)
+            return f"{cand.isoformat()} {int(h):02d}:{int(mi or 0):02d}:00"
     except Exception as e:
         print(f"normalize error '{raw_text}': {e}")
     return None
+
+
+def normalize_event_datetime(raw: Optional[str]) -> Optional[str]:
+    """公演日時を 'YYYY-MM-DD' か 'YYYY-MM-DD HH:MM' に正規化(表示・重複判定の一貫性用)。
+    日付が取れなければ原文のまま返す(情報を捨てない)。"""
+    if not raw:
+        return raw
+    t = _zen2han(raw)
+    m = re.search(r"(\d{4})[-/年.](\d{1,2})[-/月.](\d{1,2})", t)
+    if m:
+        y, mo, d = m.groups()
+        base = f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+    else:
+        # 年なし MM/DD → 当年補完(過去すぎれば翌年)
+        m = re.search(r"(?<!\d)(\d{1,2})[-/月.](\d{1,2})(?!\d)", t)
+        if not m:
+            return raw
+        mo, d = m.groups()
+        today = datetime.datetime.now(JST).date()
+        try:
+            cand = datetime.date(today.year, int(mo), int(d))
+        except ValueError:
+            return raw
+        if cand < today - datetime.timedelta(days=60):
+            cand = cand.replace(year=today.year + 1)
+        base = cand.isoformat()
+    tm = re.search(r"(\d{1,2})[：:時](\d{2})", t)
+    return f"{base} {int(tm.group(1)):02d}:{tm.group(2)}" if tm else base
+
+
+def clean_venue(v: Optional[str]) -> Optional[str]:
+    """会場名の整形。前後の空白・改行を詰め、『会場:』『@』等の接頭ラベルを落とす。"""
+    if not v:
+        return v
+    v = re.sub(r"\s+", " ", v).strip()
+    v = re.sub(r"^(?:会場|場所|at|＠|@)\s*[:：]?\s*", "", v, flags=re.IGNORECASE)
+    return v.strip() or None
 
 
 def parse_ticket_info_fallback(text: str, urls: Optional[List[str]] = None) -> dict:
@@ -331,7 +385,7 @@ def enrich_row_with_ticketdive(row: dict) -> dict:
     if not row.get("open_time") and info.get("open_time"):
         row["open_time"] = info["open_time"]
     if not row.get("other_details") and info.get("venue"):
-        row["other_details"] = info["venue"]
+        row["other_details"] = clean_venue(info["venue"])
     return row
 
 
@@ -342,7 +396,7 @@ def build_row(tweet, username: str, idol_slug: str, info: dict) -> dict:
         "idol_slug": idol_slug,
         "account": username,
         "event_name": info.get("event_name"),
-        "event_datetime": info.get("event_datetime"),
+        "event_datetime": normalize_event_datetime(info.get("event_datetime")),
         "open_time": open_t,
         "entry_time": entry_t,
         "sale_datetime": to_timestamptz(info.get("sale_datetime")),
@@ -350,7 +404,7 @@ def build_row(tweet, username: str, idol_slug: str, info: dict) -> dict:
         "ticket_url": info.get("ticket_url"),
         "ticket_types": info.get("ticket_types") or [],
         "max_tickets": info.get("max_tickets"),
-        "other_details": info.get("other_details"),
+        "other_details": clean_venue(info.get("other_details")),
         "raw_text": tweet.text,
         "tweet_url": f"https://x.com/{username}/status/{tweet.id}",
     }
@@ -431,7 +485,7 @@ def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
         "idol_slug": slug,
         "account": None,
         "event_name": ev.event_name,
-        "event_datetime": ev.event_datetime,
+        "event_datetime": normalize_event_datetime(ev.event_datetime),
         "open_time": ev.open_time,
         "entry_time": ev.entry_time,
         "sale_datetime": sale,
@@ -439,7 +493,7 @@ def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
         "ticket_url": ev.ticket_url,
         "ticket_types": [t.model_dump() for t in ev.ticket_types],
         "max_tickets": None,
-        "other_details": ev.venue,
+        "other_details": clean_venue(ev.venue),
         "raw_text": None,
         "tweet_url": site_url,
     }
@@ -468,17 +522,28 @@ def run_sites() -> int:
             print("  変更なし。スキップ")
             continue
         count = 0
+        emitted_ids = set()
         for ev in events:
             row = build_site_row(slug, name, url, ev)
             if row:
                 enrich_row_with_ticketdive(row)
                 try:
                     sb.upsert_auto_event(row)
+                    emitted_ids.add(row["tweet_id"])
                     count += 1
                 except Exception as e:
                     print(f"  書き込み失敗: {e}")
+        # 再突合: 今回出力しなかった過去のsite行(終了・削除・変更済み)を掃除して最新に保つ
+        removed = 0
+        try:
+            for old_id in sb.get_auto_event_ids(slug, prefix=f"site:{slug}:"):
+                if old_id not in emitted_ids:
+                    sb.delete_auto_event(old_id)
+                    removed += 1
+        except Exception as e:
+            print(f"  再突合(削除)でエラー: {e}")
         sb.set_last_seen(state_key, content_hash)
-        print(f"  {count} 件のイベントを反映")
+        print(f"  {count} 件反映 / {removed} 件削除")
         total += count
     print(f"公式サイト取り込み完了: 合計 {total} 件")
     return total
@@ -495,7 +560,7 @@ def build_timetree_row(slug: str, name: str, tt_url: str, ev: dict) -> Optional[
         "idol_slug": slug,
         "account": None,
         "event_name": ev["title"],
-        "event_datetime": ev.get("event_datetime"),
+        "event_datetime": normalize_event_datetime(ev.get("event_datetime")),
         "open_time": open_t,
         "entry_time": entry_t,
         "sale_datetime": sale,
@@ -503,7 +568,7 @@ def build_timetree_row(slug: str, name: str, tt_url: str, ev: dict) -> Optional[
         "ticket_url": ev.get("ticket_url"),
         "ticket_types": [],
         "max_tickets": None,
-        "other_details": ev.get("venue"),
+        "other_details": clean_venue(ev.get("venue")),
         "raw_text": ev.get("note") or None,
         "tweet_url": ev.get("page_url") or tt_url,
     }
