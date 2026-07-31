@@ -19,6 +19,11 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v4: チケット無しの公演/ライブ出演予定も網羅対象に(イベント情報の取りこぼしを減らす)
 PROMPT_VERSION = "v4"
 
+# 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
+RENDER_MIN_CHARS = 1500
+# 1サイトあたりのヘッドレス描画ページ数の上限(home + サブページ)
+RENDER_MAX_PAGES = 3
+
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
 SUBPAGE_KEYWORDS = [
     "news", "schedule", "live", "ticket", "event", "information", "info",
@@ -74,6 +79,45 @@ def _find_subpages(html: str, base_url: str) -> List[str]:
         if len(found) >= 3:
             break
     return found
+
+
+def _render_site(site_url: str) -> List[str]:
+    """JS描画(SPA)サイトをヘッドレスChromiumで開き、home + 関連サブページの
+    可視テキストを返す。playwright未導入・失敗時は [](静的処理にフォールバック)。
+    ※GitHub Actions は直接ネット接続なのでプロキシ設定は不要。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return []
+    texts: List[str] = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                page = browser.new_page(user_agent=UA)
+
+                def render(u: str) -> str:
+                    page.goto(u, wait_until="domcontentloaded", timeout=25000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass  # networkidleに達しなくても現時点のDOMで十分
+                    return page.content()
+
+                home_html = render(site_url)
+                texts.append(_html_to_text(home_html))
+                subs = _find_subpages(home_html, site_url)
+                for sub in subs[: RENDER_MAX_PAGES - 1]:
+                    try:
+                        texts.append(_html_to_text(render(sub)))
+                    except Exception as e:
+                        print(f"    JSレンダリング失敗(サブ) {sub}: {e}")
+            finally:
+                browser.close()
+    except Exception as e:
+        print(f"    JSレンダリング失敗 {site_url}: {e}")
+        return []
+    return [t for t in texts if t]
 
 
 class TicketType(BaseModel):
@@ -139,19 +183,38 @@ def extract_events(gemini_client, name: str, text: str) -> List[SiteEvent]:
 
 def fetch_site_events(gemini_client, idol_slug: str, name: str, site_url: str):
     """公式サイト(+ News/Schedule サブページ)を取得し、(content_hash, [SiteEvent]) を返す。
-    取得できなければ (None, [])。"""
+    取得できなければ (None, [])。
+    静的HTMLの可視テキストが極端に短い(JS描画のSPA)場合は、ヘッドレスChromiumで
+    描画し直してから抽出する(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。"""
     import hashlib
 
     home = _get(site_url)
-    if not home:
+    home_text = _html_to_text(home) if home else ""
+
+    if len(home_text) < RENDER_MIN_CHARS:
+        # SPAの可能性 → ヘッドレスで取り直す。描画で内容が増えればそれを使う。
+        rendered = _render_site(site_url)
+        if sum(len(t) for t in rendered) > len(home_text):
+            print(f"    JS描画で取得(静的{len(home_text)}字→描画{sum(len(t) for t in rendered)}字)")
+            texts = rendered
+        else:
+            texts = [home_text] if home_text else []
+            for sub in (_find_subpages(home, site_url) if home else []):
+                h = _get(sub)
+                if h:
+                    texts.append(_html_to_text(h))
+    else:
+        texts = [home_text]
+        for sub in _find_subpages(home, site_url):
+            h = _get(sub)
+            if h:
+                texts.append(_html_to_text(h))
+
+    if not texts:
         return None, []
-    texts = [_html_to_text(home)]
-    for sub in _find_subpages(home, site_url):
-        h = _get(sub)
-        if h:
-            texts.append(_html_to_text(h))
     combined = "\n\n".join(texts)
-    # PROMPT_VERSION を含めることで、抽出プロンプトを更新したら再抽出が走る
+    # PROMPT_VERSION を含めることで、抽出プロンプトを更新したら再抽出が走る。
+    # JS描画で本文が変われば content_hash も変わるため、既読SPAサイトも自動で再抽出される。
     content_hash = hashlib.sha1((PROMPT_VERSION + "\n" + combined).encode("utf-8", "ignore")).hexdigest()
     events = extract_events(gemini_client, name, combined)
     return content_hash, events
