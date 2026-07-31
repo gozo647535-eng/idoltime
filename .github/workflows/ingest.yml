@@ -2,7 +2,9 @@ name: Ingest ticket posts
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 1日1回(UTC 0時 = JST 9時)。代行APIの無料枠/低コストに合わせた設定
+    # 1日1回。UTC 9時 = Gemini無料枠の日次リセット(米国太平洋時間の深夜0時 ≒ UTC 7時)の直後に実行し、
+    # 常にフレッシュな無料枠で回せるようにする(JST 18時)。
+    - cron: '0 9 * * *'
   workflow_dispatch: {} # 手動実行も可能
 
 concurrency:
