@@ -37,6 +37,11 @@ def _gemini_throttle():
         time.sleep(_GEMINI_MIN_INTERVAL - dt)
     _gemini_last_call[0] = time.time()
 
+
+# 本日の無料枠を使い切ったと確定したら以降のGemini呼び出しを即スキップする(タイムアウト防止)。
+# ハッシュ未更新のまま返すので、枠が回復した次回実行で取得される。
+_quota_exhausted = [False]
+
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
 SUBPAGE_KEYWORDS = [
     "news", "schedule", "live", "ticket", "event", "information", "info",
@@ -163,6 +168,8 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
     確定できなかった場合は None(呼び出し側は状態を更新せず次回再試行する)。"""
     if not gemini_client or not text.strip():
         return []
+    if _quota_exhausted[0]:
+        return None  # 本日の無料枠切れ確定 → 呼ばずにスキップ(次回実行で取得)
     import datetime
     from google.genai import types
 
@@ -181,7 +188,8 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
 
 【公式サイト本文】
 {text[:15000]}"""
-    for attempt in range(3):
+    # 429時は1回だけ短く待って再試行。2回目も429なら本日の枠切れとみなし、以降はスキップ。
+    for attempt in range(2):
         try:
             _gemini_throttle()
             res = gemini_client.models.generate_content(
@@ -196,15 +204,20 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
             return res.parsed.events
         except Exception as e:
             msg = str(e)
-            if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) and attempt < 2:
+            is_quota = "429" in msg or "RESOURCE_EXHAUSTED" in msg
+            if is_quota and attempt == 0:
                 m = re.search(r"retry in ([\d.]+)s", msg)
-                wait = min(float(m.group(1)) + 1, 60) if m else 30
-                print(f"    Gemini 429(レート制限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2)")
+                wait = min(float(m.group(1)) + 1, 20) if m else 15
+                print(f"    Gemini 429。{wait:.0f}s 待って1回だけ再試行")
                 time.sleep(wait)
                 continue
+            if is_quota:
+                # 2回連続429 → 本日の無料枠切れ確定。以降は即スキップしてタイムアウトを避ける。
+                _quota_exhausted[0] = True
+                print("    Gemini無料枠切れ確定。以降のサイトはスキップ(次回実行で取得)")
+                return None
             print(f"    Gemini抽出失敗: {e}")
-            # 一時的な失敗(レート制限/通信)は None を返し、状態未更新で次回再試行させる
-            return None if ("429" in msg or "RESOURCE_EXHAUSTED" in msg or "deadline" in msg.lower()) else []
+            return None if "deadline" in msg.lower() else []
     return None
 
 
