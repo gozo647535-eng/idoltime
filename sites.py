@@ -27,7 +27,7 @@ RENDER_MIN_CHARS = 1500
 RENDER_MAX_PAGES = 3
 
 # Gemini 無料枠(gemini-2.5-flash は 20 req/分)を超えないよう、呼び出し間隔を空ける
-_GEMINI_MIN_INTERVAL = 3.6  # 秒 → 最大 ~16 req/分
+_GEMINI_MIN_INTERVAL = 4.5  # 秒 → 最大 ~13 req/分(20/分に余裕を持たせる)
 _gemini_last_call = [0.0]
 
 
@@ -188,8 +188,9 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
 
 【公式サイト本文】
 {text[:15000]}"""
-    # 429時は1回だけ短く待って再試行。2回目も429なら本日の枠切れとみなし、以降はスキップ。
-    for attempt in range(2):
+    # 429 は主に「分あたり20件」の一時的な上限。指示された待機時間(最大65s)をきちんと待って
+    # 再試行すれば通る。3回とも待っても通らなければ恒常的な枠切れとみなし、以降はスキップする。
+    for attempt in range(3):
         try:
             _gemini_throttle()
             res = gemini_client.models.generate_content(
@@ -205,16 +206,16 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
         except Exception as e:
             msg = str(e)
             is_quota = "429" in msg or "RESOURCE_EXHAUSTED" in msg
-            if is_quota and attempt == 0:
+            if is_quota and attempt < 2:
                 m = re.search(r"retry in ([\d.]+)s", msg)
-                wait = min(float(m.group(1)) + 1, 20) if m else 15
-                print(f"    Gemini 429。{wait:.0f}s 待って1回だけ再試行")
+                wait = min(float(m.group(1)) + 1, 65) if m else 30
+                print(f"    Gemini 429(分あたり上限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2)")
                 time.sleep(wait)
                 continue
             if is_quota:
-                # 2回連続429 → 本日の無料枠切れ確定。以降は即スキップしてタイムアウトを避ける。
+                # 3回とも(毎回フル待機して)429 → 恒常的な枠切れとみなし以降スキップ(タイムアウト防止)
                 _quota_exhausted[0] = True
-                print("    Gemini無料枠切れ確定。以降のサイトはスキップ(次回実行で取得)")
+                print("    Gemini枠が回復せず。以降のサイトはスキップ(次回実行で取得)")
                 return None
             print(f"    Gemini抽出失敗: {e}")
             return None if "deadline" in msg.lower() else []
