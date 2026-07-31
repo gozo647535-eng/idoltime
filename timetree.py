@@ -230,6 +230,12 @@ def _gemini_note_ticket(gemini_client, title: str, note: str, today: str):
         "発売情報が無ければ sale_datetime は null。\n\nメモ:\n" + note[:1200]
     )
     try:
+        # Gemini 無料枠のレート制限を守る(sites 側と同じ間隔制御を共用)
+        try:
+            import sites
+            sites._gemini_throttle()
+        except Exception:
+            pass
         res = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,

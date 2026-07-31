@@ -6,6 +6,7 @@ Xより壊れにくく、認証も不要。標準ライブラリ + bs4 + google-
 """
 import gzip
 import re
+import time
 import urllib.request
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
@@ -17,12 +18,24 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 
 # 抽出プロンプトを変更したらこの値を上げる(既読サイトの再抽出をトリガーする)
 # v4: チケット無しの公演/ライブ出演予定も網羅対象に(イベント情報の取りこぼしを減らす)
-PROMPT_VERSION = "v4"
+# v5: JS描画対応 + Geminiのレート制限/再試行(既読サイトも本文が変わるので再抽出したい)
+PROMPT_VERSION = "v5"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
 # 1サイトあたりのヘッドレス描画ページ数の上限(home + サブページ)
 RENDER_MAX_PAGES = 3
+
+# Gemini 無料枠(gemini-2.5-flash は 20 req/分)を超えないよう、呼び出し間隔を空ける
+_GEMINI_MIN_INTERVAL = 3.6  # 秒 → 最大 ~16 req/分
+_gemini_last_call = [0.0]
+
+
+def _gemini_throttle():
+    dt = time.time() - _gemini_last_call[0]
+    if dt < _GEMINI_MIN_INTERVAL:
+        time.sleep(_GEMINI_MIN_INTERVAL - dt)
+    _gemini_last_call[0] = time.time()
 
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
 SUBPAGE_KEYWORDS = [
@@ -144,7 +157,10 @@ class SiteExtraction(BaseModel):
     events: List[SiteEvent] = Field(default=[], description="今後のチケット/イベント情報のリスト")
 
 
-def extract_events(gemini_client, name: str, text: str) -> List[SiteEvent]:
+def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEvent]]:
+    """公式サイト本文から今後の公演を抽出する。
+    返り値: 抽出結果のリスト([] は「該当なし」)。Geminiの一時失敗(429/通信エラー)で
+    確定できなかった場合は None(呼び出し側は状態を更新せず次回再試行する)。"""
     if not gemini_client or not text.strip():
         return []
     import datetime
@@ -165,27 +181,39 @@ def extract_events(gemini_client, name: str, text: str) -> List[SiteEvent]:
 
 【公式サイト本文】
 {text[:15000]}"""
-    try:
-        res = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=SiteExtraction,
-                temperature=0.1,
-            ),
-        )
-        return res.parsed.events
-    except Exception as e:
-        print(f"    Gemini抽出失敗: {e}")
-        return []
+    for attempt in range(3):
+        try:
+            _gemini_throttle()
+            res = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=SiteExtraction,
+                    temperature=0.1,
+                ),
+            )
+            return res.parsed.events
+        except Exception as e:
+            msg = str(e)
+            if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) and attempt < 2:
+                m = re.search(r"retry in ([\d.]+)s", msg)
+                wait = min(float(m.group(1)) + 1, 60) if m else 30
+                print(f"    Gemini 429(レート制限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2)")
+                time.sleep(wait)
+                continue
+            print(f"    Gemini抽出失敗: {e}")
+            # 一時的な失敗(レート制限/通信)は None を返し、状態未更新で次回再試行させる
+            return None if ("429" in msg or "RESOURCE_EXHAUSTED" in msg or "deadline" in msg.lower()) else []
+    return None
 
 
-def fetch_site_events(gemini_client, idol_slug: str, name: str, site_url: str):
-    """公式サイト(+ News/Schedule サブページ)を取得し、(content_hash, [SiteEvent]) を返す。
-    取得できなければ (None, [])。
+def fetch_site_content(site_url: str):
+    """公式サイト(+ News/Schedule サブページ)の本文を取得し (content_hash, combined_text) を返す。
+    取得できなければ (None, '')。**Geminiは呼ばない**(呼び出し側で content_hash を見て
+    変化があるときだけ extract_events を呼ぶことで、無料枠の消費を最小化する)。
     静的HTMLの可視テキストが極端に短い(JS描画のSPA)場合は、ヘッドレスChromiumで
-    描画し直してから抽出する(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。"""
+    描画し直す(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。"""
     import hashlib
 
     home = _get(site_url)
@@ -211,10 +239,9 @@ def fetch_site_events(gemini_client, idol_slug: str, name: str, site_url: str):
                 texts.append(_html_to_text(h))
 
     if not texts:
-        return None, []
+        return None, ""
     combined = "\n\n".join(texts)
     # PROMPT_VERSION を含めることで、抽出プロンプトを更新したら再抽出が走る。
     # JS描画で本文が変われば content_hash も変わるため、既読SPAサイトも自動で再抽出される。
     content_hash = hashlib.sha1((PROMPT_VERSION + "\n" + combined).encode("utf-8", "ignore")).hexdigest()
-    events = extract_events(gemini_client, name, combined)
-    return content_hash, events
+    return content_hash, combined

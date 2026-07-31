@@ -511,15 +511,21 @@ def run_sites() -> int:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
         print(f"{name} の公式サイトを確認: {url}")
         try:
-            content_hash, events = sites.fetch_site_events(gemini_client, slug, name, url)
+            content_hash, combined = sites.fetch_site_content(url)
         except Exception as e:
             print(f"  失敗: {e}")
             continue
         if content_hash is None:
             continue
         state_key = f"site:{slug}"
+        # 本文に変化が無ければ Gemini を呼ばずにスキップ(無料枠の節約)
         if sb.get_last_seen(state_key) == content_hash:
             print("  変更なし。スキップ")
+            continue
+        events = sites.extract_events(gemini_client, name, combined)
+        if events is None:
+            # レート制限/通信の一時失敗 → 状態を更新せず次回再試行(誤って空で上書きしない)
+            print("  抽出できず(次回再試行)")
             continue
         count = 0
         emitted_ids = set()
