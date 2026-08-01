@@ -499,8 +499,31 @@ def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
     }
 
 
+def _site_event_dedup_key(name, datetime_str):
+    """同一公演の重複判定キー(正規化した名前 + 日付部分)。"""
+    n = re.sub(r"\s+", "", (name or "").lower())
+    d = (normalize_event_datetime(datetime_str) or "")[:10]
+    return (n, d)
+
+
+def merge_site_events(jsonld_events, gemini_events):
+    """JSON-LD(構造化データ・高精度)を優先し、Geminiが拾った未カバーの公演を追加する。"""
+    merged = []
+    seen = set()
+    for ev in list(jsonld_events) + list(gemini_events):
+        if not getattr(ev, "event_name", None):
+            continue
+        k = _site_event_dedup_key(ev.event_name, ev.event_datetime)
+        if k in seen:
+            continue
+        seen.add(k)
+        merged.append(ev)
+    return merged
+
+
 def run_sites() -> int:
-    """公式サイトを巡回してイベント/チケット情報を取り込む(主軸)。"""
+    """公式サイトを巡回してイベント/チケット情報を取り込む(主軸)。
+    JSON-LD(schema.org Event)を Gemini不要で抽出し、Gemini解析結果と統合する。"""
     watch = build_site_watch_list()
     if not watch:
         print("公式サイトの監視対象がありません(図鑑に公式サイトURLが未登録の可能性)。")
@@ -511,25 +534,30 @@ def run_sites() -> int:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
         print(f"{name} の公式サイトを確認: {url}")
         try:
-            content_hash, combined = sites.fetch_site_content(url)
+            content_hash, combined, jsonld_events = sites.fetch_site_content(url)
         except Exception as e:
             print(f"  失敗: {e}")
             continue
         if content_hash is None:
             continue
         state_key = f"site:{slug}"
-        # 本文に変化が無ければ Gemini を呼ばずにスキップ(無料枠の節約)
+        # 本文/構造化データに変化が無ければ Gemini を呼ばずにスキップ(無料枠の節約)
         if sb.get_last_seen(state_key) == content_hash:
             print("  変更なし。スキップ")
             continue
-        events = sites.extract_events(gemini_client, name, combined)
-        if events is None:
-            # レート制限/通信の一時失敗 → 状態を更新せず次回再試行(誤って空で上書きしない)
+        gemini_events = sites.extract_events(gemini_client, name, combined)
+        gemini_ok = gemini_events is not None
+        if not gemini_ok:
+            gemini_events = []
+        if not gemini_ok and not jsonld_events:
+            # Geminiが一時失敗、かつJSON-LDも無し → 状態を更新せず次回再試行
             print("  抽出できず(次回再試行)")
             continue
+
+        merged = merge_site_events(jsonld_events, gemini_events)
         count = 0
         emitted_ids = set()
-        for ev in events:
+        for ev in merged:
             row = build_site_row(slug, name, url, ev)
             if row:
                 enrich_row_with_ticketdive(row)
@@ -539,17 +567,23 @@ def run_sites() -> int:
                     count += 1
                 except Exception as e:
                     print(f"  書き込み失敗: {e}")
-        # 再突合: 今回出力しなかった過去のsite行(終了・削除・変更済み)を掃除して最新に保つ
-        removed = 0
-        try:
-            for old_id in sb.get_auto_event_ids(slug, prefix=f"site:{slug}:"):
-                if old_id not in emitted_ids:
-                    sb.delete_auto_event(old_id)
-                    removed += 1
-        except Exception as e:
-            print(f"  再突合(削除)でエラー: {e}")
-        sb.set_last_seen(state_key, content_hash)
-        print(f"  {count} 件反映 / {removed} 件削除")
+
+        if gemini_ok:
+            # 再突合: 今回出力しなかった過去のsite行(終了・削除・変更済み)を掃除して最新に保つ
+            removed = 0
+            try:
+                for old_id in sb.get_auto_event_ids(slug, prefix=f"site:{slug}:"):
+                    if old_id not in emitted_ids:
+                        sb.delete_auto_event(old_id)
+                        removed += 1
+            except Exception as e:
+                print(f"  再突合(削除)でエラー: {e}")
+            sb.set_last_seen(state_key, content_hash)
+            print(f"  {count} 件反映 / {removed} 件削除")
+        else:
+            # Gemini一時失敗: JSON-LD分だけ即反映。削除・状態更新はせず次回Geminiを再試行する
+            # (既存のGemini由来イベントを枠切れで消さないため、reconcileとhash更新は行わない)
+            print(f"  {count} 件反映(JSON-LDのみ / Gemini次回再試行)")
         total += count
     print(f"公式サイト取り込み完了: 合計 {total} 件")
     return total

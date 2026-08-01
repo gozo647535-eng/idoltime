@@ -101,13 +101,14 @@ def _find_subpages(html: str, base_url: str) -> List[str]:
 
 def _render_site(site_url: str) -> List[str]:
     """JS描画(SPA)サイトをヘッドレスChromiumで開き、home + 関連サブページの
-    可視テキストを返す。playwright未導入・失敗時は [](静的処理にフォールバック)。
+    描画後の生HTMLを返す(可視テキストとJSON-LDの両方に使う)。
+    playwright未導入・失敗時は [](静的処理にフォールバック)。
     ※GitHub Actions は直接ネット接続なのでプロキシ設定は不要。"""
     try:
         from playwright.sync_api import sync_playwright
     except Exception:
         return []
-    texts: List[str] = []
+    htmls: List[str] = []
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -123,11 +124,11 @@ def _render_site(site_url: str) -> List[str]:
                     return page.content()
 
                 home_html = render(site_url)
-                texts.append(_html_to_text(home_html))
+                htmls.append(home_html)
                 subs = _find_subpages(home_html, site_url)
                 for sub in subs[: RENDER_MAX_PAGES - 1]:
                     try:
-                        texts.append(_html_to_text(render(sub)))
+                        htmls.append(render(sub))
                     except Exception as e:
                         print(f"    JSレンダリング失敗(サブ) {sub}: {e}")
             finally:
@@ -135,7 +136,7 @@ def _render_site(site_url: str) -> List[str]:
     except Exception as e:
         print(f"    JSレンダリング失敗 {site_url}: {e}")
         return []
-    return [t for t in texts if t]
+    return [h for h in htmls if h]
 
 
 class TicketType(BaseModel):
@@ -160,6 +161,167 @@ class SiteEvent(BaseModel):
 
 class SiteExtraction(BaseModel):
     events: List[SiteEvent] = Field(default=[], description="今後のチケット/イベント情報のリスト")
+
+
+# ============================================================
+# JSON-LD (schema.org Event) 抽出 — Gemini不要・高精度
+# ============================================================
+# 多くの公式サイト/チケットサイトは <script type="application/ld+json"> に
+# schema.org の Event/MusicEvent 構造化データを埋め込んでいる。これを直接パースすれば
+# Gemini を消費せずに正確な公演情報(日時・会場・チケット)を取得できる。
+
+# schema.org で「イベント」とみなす @type(Festival 等 "Event" を含まない型も明示)
+_JSONLD_EVENT_TYPES = {
+    "Festival", "MusicFestival", "Concert", "Screening", "ExhibitionEvent",
+}
+
+
+def _jsonld_type_is_event(obj: dict) -> bool:
+    t = obj.get("@type")
+    types = t if isinstance(t, list) else [t]
+    for x in types:
+        if isinstance(x, str) and ("Event" in x or x in _JSONLD_EVENT_TYPES):
+            return True
+    return False
+
+
+def _iter_jsonld_objects(data):
+    """JSON-LD のトップ要素(dict/list/@graph)を再帰的に走査して dict を yield する。"""
+    if isinstance(data, list):
+        for item in data:
+            yield from _iter_jsonld_objects(item)
+    elif isinstance(data, dict):
+        graph = data.get("@graph")
+        if isinstance(graph, list):
+            for item in graph:
+                yield from _iter_jsonld_objects(item)
+        yield data
+
+
+def _iso_display_datetime(s) -> Optional[str]:
+    """ISO8601 → 'YYYY-MM-DD HH:MM'(時刻が無ければ 'YYYY-MM-DD')。"""
+    s = str(s)
+    dm = re.match(r"(\d{4}-\d{2}-\d{2})", s)
+    if not dm:
+        return None
+    tm = re.search(r"T(\d{2}:\d{2})", s)
+    return f"{dm.group(1)} {tm.group(1)}" if tm else dm.group(1)
+
+
+def _iso_time(s) -> Optional[str]:
+    tm = re.search(r"T(\d{2}:\d{2})", str(s))
+    return tm.group(1) if tm else None
+
+
+def _iso_sale_datetime(s) -> Optional[str]:
+    """ISO8601 → 'YYYY-MM-DD HH:MM:SS'(build_site_row 側で timestamptz 化される)。"""
+    s = str(s)
+    dm = re.match(r"(\d{4}-\d{2}-\d{2})", s)
+    if not dm:
+        return None
+    tm = re.search(r"T(\d{2}:\d{2}(?::\d{2})?)", s)
+    if tm:
+        t = tm.group(1)
+        if len(t) == 5:
+            t += ":00"
+        return f"{dm.group(1)} {t}"
+    return f"{dm.group(1)} 00:00:00"
+
+
+def _jsonld_location_name(loc) -> Optional[str]:
+    if isinstance(loc, list):
+        loc = loc[0] if loc else None
+    if isinstance(loc, dict):
+        n = loc.get("name")
+        if isinstance(n, str) and n.strip():
+            return n.strip()
+    elif isinstance(loc, str) and loc.strip():
+        return loc.strip()
+    return None
+
+
+def _jsonld_offers(offers):
+    """offers(dict/list)から (ticket_url, sale_datetime, ticket_types) を取り出す。"""
+    if not offers:
+        return None, None, []
+    if isinstance(offers, dict):
+        offers = [offers]
+    if not isinstance(offers, list):
+        return None, None, []
+    url = None
+    sale = None
+    types: List[TicketType] = []
+    for of in offers:
+        if not isinstance(of, dict):
+            continue
+        if not url and of.get("url"):
+            url = str(of["url"])
+        if not sale:
+            starts = of.get("availabilityStarts") or of.get("validFrom")
+            if starts:
+                sale = _iso_sale_datetime(starts)
+        price = of.get("price")
+        if price not in (None, "", 0):
+            cur = of.get("priceCurrency") or "JPY"
+            suffix = "円" if cur in ("JPY", "円") else f" {cur}"
+            label = of.get("name") or of.get("category") or "チケット"
+            types.append(TicketType(name=str(label), price=f"{price}{suffix}"))
+    return url, sale, types
+
+
+def _jsonld_to_site_event(obj: dict, today: str) -> Optional[SiteEvent]:
+    name = obj.get("name")
+    start = obj.get("startDate")
+    if not name or not start:
+        return None
+    m = re.match(r"(\d{4}-\d{2}-\d{2})", str(start))
+    if not m:
+        return None
+    if m.group(1) < today:
+        return None  # 終了済みの公演は除外
+    door = obj.get("doorTime")
+    ticket_url, sale_dt, ticket_types = _jsonld_offers(obj.get("offers"))
+    return SiteEvent(
+        event_name=str(name).strip(),
+        event_datetime=_iso_display_datetime(start),
+        open_time=_iso_time(door) if door else None,
+        entry_time=None,
+        sale_datetime=sale_dt,
+        is_first_come=False,
+        ticket_url=ticket_url,
+        venue=_jsonld_location_name(obj.get("location")),
+        ticket_types=ticket_types,
+    )
+
+
+def _parse_jsonld_events(html: str) -> List[SiteEvent]:
+    """HTML中の schema.org Event 構造化データから今後の公演を抽出する(Gemini不要)。"""
+    import datetime as _dt
+    import json
+
+    if not html:
+        return []
+    today = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).strftime("%Y-%m-%d")
+    soup = BeautifulSoup(html, "html.parser")
+    out: List[SiteEvent] = []
+    for tag in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = (tag.string or tag.get_text() or "").strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue  # 壊れた/独自拡張のJSONは無視
+        for obj in _iter_jsonld_objects(data):
+            if not isinstance(obj, dict) or not _jsonld_type_is_event(obj):
+                continue
+            try:
+                ev = _jsonld_to_site_event(obj, today)
+            except Exception:
+                ev = None
+            if ev:
+                out.append(ev)
+    return out
 
 
 def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEvent]]:
@@ -223,39 +385,60 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
 
 
 def fetch_site_content(site_url: str):
-    """公式サイト(+ News/Schedule サブページ)の本文を取得し (content_hash, combined_text) を返す。
-    取得できなければ (None, '')。**Geminiは呼ばない**(呼び出し側で content_hash を見て
+    """公式サイト(+ News/Schedule サブページ)を取得し (content_hash, combined_text, jsonld_events)
+    を返す。取得できなければ (None, '', [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
     変化があるときだけ extract_events を呼ぶことで、無料枠の消費を最小化する)。
     静的HTMLの可視テキストが極端に短い(JS描画のSPA)場合は、ヘッドレスChromiumで
-    描画し直す(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。"""
+    描画し直す(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。
+    併せて生HTML中の schema.org Event(JSON-LD)を Gemini不要で抽出して返す。"""
     import hashlib
 
     home = _get(site_url)
     home_text = _html_to_text(home) if home else ""
+    htmls: List[str] = []
 
     if len(home_text) < RENDER_MIN_CHARS:
-        # SPAの可能性 → ヘッドレスで取り直す。描画で内容が増えればそれを使う。
+        # SPAの可能性 → ヘッドレスで取り直す。描画で本文が増えればそれ(生HTML)を使う。
         rendered = _render_site(site_url)
-        if sum(len(t) for t in rendered) > len(home_text):
-            print(f"    JS描画で取得(静的{len(home_text)}字→描画{sum(len(t) for t in rendered)}字)")
-            texts = rendered
+        rendered_text_len = sum(len(_html_to_text(h)) for h in rendered)
+        if rendered_text_len > len(home_text):
+            print(f"    JS描画で取得(静的{len(home_text)}字→描画{rendered_text_len}字)")
+            htmls = rendered
         else:
-            texts = [home_text] if home_text else []
+            if home:
+                htmls.append(home)
             for sub in (_find_subpages(home, site_url) if home else []):
                 h = _get(sub)
                 if h:
-                    texts.append(_html_to_text(h))
+                    htmls.append(h)
     else:
-        texts = [home_text]
+        htmls = [home]
         for sub in _find_subpages(home, site_url):
             h = _get(sub)
             if h:
-                texts.append(_html_to_text(h))
+                htmls.append(h)
 
-    if not texts:
-        return None, ""
+    texts = [t for t in (_html_to_text(h) for h in htmls) if t]
+
+    # JSON-LD(schema.org Event)を抽出。名前+日時で重複除去。
+    jsonld_events: List[SiteEvent] = []
+    seen_ld = set()
+    for h in htmls:
+        for ev in _parse_jsonld_events(h):
+            k = (ev.event_name, ev.event_datetime)
+            if k not in seen_ld:
+                seen_ld.add(k)
+                jsonld_events.append(ev)
+    if jsonld_events:
+        print(f"    JSON-LDから {len(jsonld_events)} 件のイベントを検出")
+
+    if not texts and not jsonld_events:
+        return None, "", []
     combined = "\n\n".join(texts)
-    # PROMPT_VERSION を含めることで、抽出プロンプトを更新したら再抽出が走る。
+    # PROMPT_VERSION と JSON-LD署名を含めることで、本文/構造化データが変わると再抽出が走る。
     # JS描画で本文が変われば content_hash も変わるため、既読SPAサイトも自動で再抽出される。
-    content_hash = hashlib.sha1((PROMPT_VERSION + "\n" + combined).encode("utf-8", "ignore")).hexdigest()
-    return content_hash, combined
+    ld_sig = "|".join(f"{e.event_name}@{e.event_datetime}" for e in jsonld_events)
+    content_hash = hashlib.sha1(
+        (PROMPT_VERSION + "\n" + combined + "\n" + ld_sig).encode("utf-8", "ignore")
+    ).hexdigest()
+    return content_hash, combined, jsonld_events
