@@ -228,15 +228,23 @@ def _iso_sale_datetime(s) -> Optional[str]:
     return f"{dm.group(1)} 00:00:00"
 
 
+def _ld_text(s) -> Optional[str]:
+    """JSON-LD文字列の整形: HTMLエンティティ(&#038; 等)を復号し前後空白を詰める。"""
+    import html as _html
+
+    if s is None:
+        return None
+    t = _html.unescape(str(s)).strip()
+    return t or None
+
+
 def _jsonld_location_name(loc) -> Optional[str]:
     if isinstance(loc, list):
         loc = loc[0] if loc else None
     if isinstance(loc, dict):
-        n = loc.get("name")
-        if isinstance(n, str) and n.strip():
-            return n.strip()
-    elif isinstance(loc, str) and loc.strip():
-        return loc.strip()
+        return _ld_text(loc.get("name"))
+    elif isinstance(loc, str):
+        return _ld_text(loc)
     return None
 
 
@@ -282,7 +290,7 @@ def _jsonld_to_site_event(obj: dict, today: str) -> Optional[SiteEvent]:
     door = obj.get("doorTime")
     ticket_url, sale_dt, ticket_types = _jsonld_offers(obj.get("offers"))
     return SiteEvent(
-        event_name=str(name).strip(),
+        event_name=_ld_text(name),
         event_datetime=_iso_display_datetime(start),
         open_time=_iso_time(door) if door else None,
         entry_time=None,
