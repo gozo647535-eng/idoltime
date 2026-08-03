@@ -12,7 +12,7 @@ from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
@@ -20,7 +20,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v4: チケット無しの公演/ライブ出演予定も網羅対象に(イベント情報の取りこぼしを減らす)
 # v5: JS描画対応 + Geminiのレート制限/再試行(既読サイトも本文が変わるので再抽出したい)
 # v6: 抽出エンジンをGroq(高い無料枠)優先に切替+JSON出力形式を明記(全サイト再抽出)
-PROMPT_VERSION = "v6"
+# v7: Groqのnull許容(is_first_come等)+8b-instant/テキスト量削減(TPD対策)。全サイト再抽出。
+PROMPT_VERSION = "v7"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -48,7 +49,9 @@ _quota_exhausted = [False]
 # GROQ_API_KEY が設定されていれば worker 側で優先的に使われる。
 import os as _os
 
-_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# llama-3.3-70b は無料枠のTPD(1日あたりトークン)が低く93サイトに届かないため、
+# TPDが大きい 8b-instant を既定に(GROQ_MODEL で上書き可)。
+_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 _GROQ_MIN_INTERVAL = 2.1  # 秒 → 最大 ~28 req/分(Groq無料枠 30/分に余裕を持たせる)
 _groq_last_call = [0.0]
 _groq_quota_exhausted = [False]
@@ -175,6 +178,18 @@ class SiteEvent(BaseModel):
     ticket_url: Optional[str] = Field(None, description="チケット販売/詳細ページのURL")
     venue: Optional[str] = Field(None, description="会場")
     ticket_types: List[TicketType] = Field(default=[], description="券種と料金")
+
+    # LLM(特にJSONモードのGroq)は必須でない項目に null を返すことがある。
+    # null を既定値に丸めて、1項目の null で抽出全体が落ちるのを防ぐ。
+    @field_validator("is_first_come", mode="before")
+    @classmethod
+    def _coerce_is_first_come(cls, v):
+        return False if v is None else v
+
+    @field_validator("ticket_types", mode="before")
+    @classmethod
+    def _coerce_ticket_types(cls, v):
+        return [] if v is None else v
 
 
 class SiteExtraction(BaseModel):
@@ -368,7 +383,7 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
 - 該当が無ければ events は空配列にする
 
 【公式サイト本文】
-{text[:15000]}"""
+{text[:8000]}"""
 
 
 def _today_jst() -> str:
