@@ -38,6 +38,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # 公式サイト抽出の一次エンジン(高い無料枠)。未設定なら GEMINI にフォールバック。
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}

@@ -19,7 +19,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # 抽出プロンプトを変更したらこの値を上げる(既読サイトの再抽出をトリガーする)
 # v4: チケット無しの公演/ライブ出演予定も網羅対象に(イベント情報の取りこぼしを減らす)
 # v5: JS描画対応 + Geminiのレート制限/再試行(既読サイトも本文が変わるので再抽出したい)
-PROMPT_VERSION = "v5"
+# v6: 抽出エンジンをGroq(高い無料枠)優先に切替+JSON出力形式を明記(全サイト再抽出)
+PROMPT_VERSION = "v6"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -41,6 +42,23 @@ def _gemini_throttle():
 # 本日の無料枠を使い切ったと確定したら以降のGemini呼び出しを即スキップする(タイムアウト防止)。
 # ハッシュ未更新のまま返すので、枠が回復した次回実行で取得される。
 _quota_exhausted = [False]
+
+# Groq(OpenAI互換)。無料枠が日次で桁違いに大きく(≒数千req/日)、Geminiの日次上限で
+# 監視サイトの後半(いぎなり東北産等)に届かない「枠到達点問題」を回避するための一次エンジン。
+# GROQ_API_KEY が設定されていれば worker 側で優先的に使われる。
+import os as _os
+
+_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+_GROQ_MIN_INTERVAL = 2.1  # 秒 → 最大 ~28 req/分(Groq無料枠 30/分に余裕を持たせる)
+_groq_last_call = [0.0]
+_groq_quota_exhausted = [False]
+
+
+def _groq_throttle():
+    dt = time.time() - _groq_last_call[0]
+    if dt < _GROQ_MIN_INTERVAL:
+        time.sleep(_GROQ_MIN_INTERVAL - dt)
+    _groq_last_call[0] = time.time()
 
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
 SUBPAGE_KEYWORDS = [
@@ -332,20 +350,13 @@ def _parse_jsonld_events(html: str) -> List[SiteEvent]:
     return out
 
 
-def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEvent]]:
-    """公式サイト本文から今後の公演を抽出する。
-    返り値: 抽出結果のリスト([] は「該当なし」)。Geminiの一時失敗(429/通信エラー)で
-    確定できなかった場合は None(呼び出し側は状態を更新せず次回再試行する)。"""
-    if not gemini_client or not text.strip():
-        return []
-    if _quota_exhausted[0]:
-        return None  # 本日の無料枠切れ確定 → 呼ばずにスキップ(次回実行で取得)
-    import datetime
-    from google.genai import types
-
-    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d")
-    prompt = f"""以下は「{name}」の公式サイトのテキストです。本日は {today}(JST)です。
+def _build_extract_prompt(name: str, text: str, today: str) -> str:
+    """公式サイト本文からの抽出プロンプト(Gemini/Groq 共通)。"""
+    return f"""以下は「{name}」の公式サイトのテキストです。本日は {today}(JST)です。
 このグループが**今後出演するライブ・イベント(公演)**を、正確なJSONで網羅的に抽出してください。チケット情報の有無に関わらず、開催日が特定できる出演予定はすべて拾ってください。
+
+出力は次の形の JSON オブジェクトのみ(前後に説明文やコードフェンスを付けない):
+{{"events": [{{"event_name": str, "event_datetime": str, "open_time": str|null, "entry_time": str|null, "sale_datetime": str|null, "is_first_come": bool, "ticket_url": str|null, "venue": str|null, "ticket_types": [{{"name": str, "price": str}}]}}]}}
 
 厳守事項:
 - 開催日が {today} より前の、すでに終了した公演は**絶対に含めない**(過去の公演は除外)
@@ -358,6 +369,82 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
 
 【公式サイト本文】
 {text[:15000]}"""
+
+
+def _today_jst() -> str:
+    import datetime
+
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d")
+
+
+def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[SiteEvent]]:
+    """Groq(OpenAI互換・高い無料枠)で今後の公演を抽出する。
+    返り値の意味は extract_events と同じ([]=該当なし / None=一時失敗で次回再試行)。"""
+    import json
+
+    if not groq_client or not text.strip():
+        return []
+    if _groq_quota_exhausted[0]:
+        return None
+    prompt = _build_extract_prompt(name, text, _today_jst())
+    for attempt in range(3):
+        try:
+            _groq_throttle()
+            res = groq_client.chat.completions.create(
+                model=_GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": "あなたはイベント情報抽出器です。指示されたJSONオブジェクトのみを返します。"},
+                    {"role": "user", "content": prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+            )
+            raw = res.choices[0].message.content or "{}"
+            data = json.loads(raw)
+            return SiteExtraction(**data).events
+        except Exception as e:
+            msg = str(e)
+            is_quota = "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower()
+            if is_quota and attempt < 2:
+                m = re.search(r"try again in ([\d.]+)s", msg)
+                wait = min(float(m.group(1)) + 1, 65) if m else 20
+                print(f"    Groq 429(レート上限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2)")
+                time.sleep(wait)
+                continue
+            if is_quota:
+                _groq_quota_exhausted[0] = True
+                print("    Groq枠が回復せず。以降のサイトはスキップ(次回実行で取得)")
+                return None
+            print(f"    Groq抽出失敗: {e}")
+            return None if any(k in msg.lower() for k in ("deadline", "timeout", "timed out")) else []
+    return None
+
+
+def extract_events_any(groq_client, gemini_client, name: str, text: str) -> Optional[List[SiteEvent]]:
+    """抽出の統合エントリ。高枠の Groq を優先し、未設定/枠切れ/一時失敗なら Gemini にフォールバック。"""
+    if groq_client:
+        r = extract_events_groq(groq_client, name, text)
+        if r is not None:
+            return r
+        # Groq が枠切れ/一時失敗 → Gemini があれば補完的に試す(無ければ None のまま次回再試行)
+        if gemini_client:
+            return extract_events(gemini_client, name, text)
+        return None
+    return extract_events(gemini_client, name, text)
+
+
+def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEvent]]:
+    """公式サイト本文から今後の公演を抽出する。
+    返り値: 抽出結果のリスト([] は「該当なし」)。Geminiの一時失敗(429/通信エラー)で
+    確定できなかった場合は None(呼び出し側は状態を更新せず次回再試行する)。"""
+    if not gemini_client or not text.strip():
+        return []
+    if _quota_exhausted[0]:
+        return None  # 本日の無料枠切れ確定 → 呼ばずにスキップ(次回実行で取得)
+    from google.genai import types
+
+    today = _today_jst()
+    prompt = _build_extract_prompt(name, text, today)
     # 429 は主に「分あたり20件」の一時的な上限。指示された待機時間(最大65s)をきちんと待って
     # 再試行すれば通る。3回とも待っても通らなければ恒常的な枠切れとみなし、以降はスキップする。
     for attempt in range(3):

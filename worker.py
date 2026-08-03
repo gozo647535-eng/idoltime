@@ -45,6 +45,19 @@ if gemini_api_key:
     except Exception as e:
         print(f"Gemini 初期化失敗。正規表現にフォールバックします: {e}")
 
+# --- Groq 準備(公式サイト抽出の一次エンジン)---
+# Groq は無料枠が日次で桁違いに大きく、Gemini の日次上限で監視サイト後半に届かない
+# 「枠到達点問題」を回避できる。GROQ_API_KEY があれば sites 抽出で優先的に使う。
+groq_client = None
+groq_api_key = os.environ.get("GROQ_API_KEY", "")
+if groq_api_key:
+    try:
+        from openai import OpenAI
+        groq_client = OpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1")
+        print(f"Groq (OpenAI互換) クライアントを初期化しました。model={sites._GROQ_MODEL}")
+    except Exception as e:
+        print(f"Groq 初期化失敗。Gemini にフォールバックします: {e}")
+
 
 class TicketType(BaseModel):
     name: str = Field(description="券種の名前 (例: 一般, SS席, 前売り)")
@@ -545,16 +558,16 @@ def run_sites() -> int:
         if sb.get_last_seen(state_key) == content_hash:
             print("  変更なし。スキップ")
             continue
-        gemini_events = sites.extract_events(gemini_client, name, combined)
-        gemini_ok = gemini_events is not None
-        if not gemini_ok:
-            gemini_events = []
-        if not gemini_ok and not jsonld_events:
-            # Geminiが一時失敗、かつJSON-LDも無し → 状態を更新せず次回再試行
+        llm_events = sites.extract_events_any(groq_client, gemini_client, name, combined)
+        llm_ok = llm_events is not None
+        if not llm_ok:
+            llm_events = []
+        if not llm_ok and not jsonld_events:
+            # LLMが一時失敗(枠切れ等)、かつJSON-LDも無し → 状態を更新せず次回再試行
             print("  抽出できず(次回再試行)")
             continue
 
-        merged = merge_site_events(jsonld_events, gemini_events)
+        merged = merge_site_events(jsonld_events, llm_events)
         count = 0
         emitted_ids = set()
         for ev in merged:
@@ -568,7 +581,7 @@ def run_sites() -> int:
                 except Exception as e:
                     print(f"  書き込み失敗: {e}")
 
-        if gemini_ok:
+        if llm_ok:
             # 再突合: 今回出力しなかった過去のsite行(終了・削除・変更済み)を掃除して最新に保つ
             removed = 0
             try:
@@ -581,9 +594,9 @@ def run_sites() -> int:
             sb.set_last_seen(state_key, content_hash)
             print(f"  {count} 件反映 / {removed} 件削除")
         else:
-            # Gemini一時失敗: JSON-LD分だけ即反映。削除・状態更新はせず次回Geminiを再試行する
-            # (既存のGemini由来イベントを枠切れで消さないため、reconcileとhash更新は行わない)
-            print(f"  {count} 件反映(JSON-LDのみ / Gemini次回再試行)")
+            # LLM一時失敗: JSON-LD分だけ即反映。削除・状態更新はせず次回再試行する
+            # (既存のLLM由来イベントを枠切れで消さないため、reconcileとhash更新は行わない)
+            print(f"  {count} 件反映(JSON-LDのみ / LLM次回再試行)")
         total += count
     print(f"公式サイト取り込み完了: 合計 {total} 件")
     return total

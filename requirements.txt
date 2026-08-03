@@ -1,4 +1,5 @@
 google-genai
+openai
 beautifulsoup4
 pydantic
 playwright
