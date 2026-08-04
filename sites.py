@@ -50,13 +50,12 @@ _quota_exhausted = [False]
 # GROQ_API_KEY が設定されていれば worker 側で優先的に使われる。
 import os as _os
 
-# llama-3.3-70b は抽出品質が高く件数も多い(8b-instantはJSON生成失敗が発生し件数減)。
-# 無料枠の律速は TPD ではなく TPM(分あたりトークン)なので、_condense_for_llm で
-# 送信トークンを絞ることで対応する(GROQ_MODEL で上書き可)。
-_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-# 律速は RPM ではなく TPM(分あたりトークン。70b無料枠 ≒12,000)。凝縮後 ~2-3k トークン/件を
-# 分あたり ~5-6件に抑えると TPM 内に収まるため、間隔を広めに取る。
-_GROQ_MIN_INTERVAL = 9.0  # 秒 → 最大 ~6-7 req/分
+# 70bは品質は高いがTPD(日次10万トークン)が律速で ~34サイトで枠切れ(いぎなり等後半に届かない)。
+# 8b-instantはTPD 50万で全93をカバー可。凝縮でTPM(6千)の単発超過とJSON生成失敗も回避される。
+_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+# 律速は TPM(分あたりトークン。8b無料枠 ≒6,000)。凝縮後 ~1.5k トークン/件を
+# 分あたり ~3-4件に抑えると TPM 内に収まるため、間隔を広めに取る。
+_GROQ_MIN_INTERVAL = 16.0  # 秒 → 最大 ~3.7 req/分(8bのTPM 6,000内に収める)
 _groq_last_call = [0.0]
 _groq_quota_exhausted = [False]
 
@@ -378,7 +377,7 @@ _EVENT_SIGNAL = re.compile(
 )
 
 
-def _condense_for_llm(text: str, limit: int = 3500) -> str:
+def _condense_for_llm(text: str, limit: int = 2000) -> str:
     """LLMへ渡す前に、イベント関連(日付・時刻・チケット・公演)の行だけを前後1行の文脈付きで
     抽出し、トークン量を大幅に削減する(Groq無料枠のTPM=分あたりトークン上限対策)。
     シグナルが乏しいページは元テキスト先頭を返す(取りこぼし防止)。"""
