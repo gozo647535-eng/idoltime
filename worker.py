@@ -715,9 +715,12 @@ async def run_x() -> int:
 
 
 def main() -> int:
-    run_sites()
-    run_timetree()
-    if os.environ.get("ENABLE_X_INGEST") == "1":
+    # X_ONLY=true は twikit(X取り込み)の動作確認用。サイト巡回/TimeTreeを飛ばしXだけ実行する。
+    x_only = os.environ.get("X_ONLY", "").lower() == "true"
+    if not x_only:
+        run_sites()
+        run_timetree()
+    if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())
     return 0
 

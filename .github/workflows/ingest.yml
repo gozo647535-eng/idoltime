@@ -5,7 +5,12 @@ on:
     # 1日1回。UTC 9時 = Gemini無料枠の日次リセット(米国太平洋時間の深夜0時 ≒ UTC 7時)の直後に実行し、
     # 常にフレッシュな無料枠で回せるようにする(JST 18時)。
     - cron: '0 9 * * *'
-  workflow_dispatch: {} # 手動実行も可能
+  workflow_dispatch:
+    inputs:
+      x_only:
+        description: "Xのみ実行(twikit動作確認用・サイト巡回とTimeTreeをスキップ)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ingest
@@ -23,6 +28,12 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: pip install -r requirements.txt
+      # X取り込み(twikit)は不安定な外部forkのため、Xを使う時だけ隔離インストールする。
+      # 失敗してもサイト取り込みは止めない(continue-on-error)。
+      - name: Install X ingest deps (twikit)
+        if: ${{ github.event.inputs.x_only == 'true' || vars.ENABLE_X_INGEST == '1' }}
+        continue-on-error: true
+        run: pip install aiohttp "git+https://codeberg.org/phin/twikit.git"
       # JSレンダリング(公式サイトがSPAの場合の予定取得)用に Chromium を導入
       - name: Install Playwright Chromium
         run: python -m playwright install --with-deps chromium
@@ -42,6 +53,9 @@ jobs:
           # 公式サイト抽出の一次エンジン(高い無料枠)。未設定なら GEMINI にフォールバック。
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # X取り込み: リポジトリ変数 ENABLE_X_INGEST=1 で日次有効化。x_only=true は動作確認用。
+          ENABLE_X_INGEST: ${{ vars.ENABLE_X_INGEST }}
+          X_ONLY: ${{ github.event.inputs.x_only }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}
           X_EMAIL: ${{ secrets.X_EMAIL }}
