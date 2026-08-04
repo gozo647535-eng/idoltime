@@ -21,7 +21,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v5: JS描画対応 + Geminiのレート制限/再試行(既読サイトも本文が変わるので再抽出したい)
 # v6: 抽出エンジンをGroq(高い無料枠)優先に切替+JSON出力形式を明記(全サイト再抽出)
 # v7: Groqのnull許容(is_first_come等)+8b-instant/テキスト量削減(TPD対策)。全サイト再抽出。
-PROMPT_VERSION = "v7"
+# v8: 70bへ戻し+イベント関連行のみに凝縮してTPM(分あたりトークン)を大幅削減。全サイト再抽出。
+PROMPT_VERSION = "v8"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -49,10 +50,13 @@ _quota_exhausted = [False]
 # GROQ_API_KEY が設定されていれば worker 側で優先的に使われる。
 import os as _os
 
-# llama-3.3-70b は無料枠のTPD(1日あたりトークン)が低く93サイトに届かないため、
-# TPDが大きい 8b-instant を既定に(GROQ_MODEL で上書き可)。
-_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
-_GROQ_MIN_INTERVAL = 2.1  # 秒 → 最大 ~28 req/分(Groq無料枠 30/分に余裕を持たせる)
+# llama-3.3-70b は抽出品質が高く件数も多い(8b-instantはJSON生成失敗が発生し件数減)。
+# 無料枠の律速は TPD ではなく TPM(分あたりトークン)なので、_condense_for_llm で
+# 送信トークンを絞ることで対応する(GROQ_MODEL で上書き可)。
+_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# 律速は RPM ではなく TPM(分あたりトークン。70b無料枠 ≒12,000)。凝縮後 ~2-3k トークン/件を
+# 分あたり ~5-6件に抑えると TPM 内に収まるため、間隔を広めに取る。
+_GROQ_MIN_INTERVAL = 9.0  # 秒 → 最大 ~6-7 req/分
 _groq_last_call = [0.0]
 _groq_quota_exhausted = [False]
 
@@ -365,9 +369,34 @@ def _parse_jsonld_events(html: str) -> List[SiteEvent]:
     return out
 
 
+# イベントに関係する行を見分けるためのシグナル(日付・時刻・チケット・公演語)
+_EVENT_SIGNAL = re.compile(
+    r"(20\d\d[./年]|\d{1,2}\s*[/月]\s*\d{1,2}|\d{1,2}\s*:\s*\d{2}|開演|開場|OPEN|START|"
+    r"チケット|ticket|発売|受付|先行|一般販売|一般発売|抽選|先着|"
+    r"LIVE|ライブ|ワンマン|公演|出演|会場|定期公演|ツアー|フェス|イベント)",
+    re.IGNORECASE,
+)
+
+
+def _condense_for_llm(text: str, limit: int = 3500) -> str:
+    """LLMへ渡す前に、イベント関連(日付・時刻・チケット・公演)の行だけを前後1行の文脈付きで
+    抽出し、トークン量を大幅に削減する(Groq無料枠のTPM=分あたりトークン上限対策)。
+    シグナルが乏しいページは元テキスト先頭を返す(取りこぼし防止)。"""
+    lines = text.split("\n")
+    keep = set()
+    for i, ln in enumerate(lines):
+        if _EVENT_SIGNAL.search(ln):
+            for j in range(max(0, i - 1), min(len(lines), i + 2)):
+                keep.add(j)
+    if len(keep) < 3:
+        return text[:limit]
+    picked = "\n".join(lines[i] for i in sorted(keep))
+    return picked[:limit]
+
+
 def _build_extract_prompt(name: str, text: str, today: str) -> str:
     """公式サイト本文からの抽出プロンプト(Gemini/Groq 共通)。"""
-    return f"""以下は「{name}」の公式サイトのテキストです。本日は {today}(JST)です。
+    return f"""以下は「{name}」の公式サイトから抜き出したイベント関連テキストです。本日は {today}(JST)です。
 このグループが**今後出演するライブ・イベント(公演)**を、正確なJSONで網羅的に抽出してください。チケット情報の有無に関わらず、開催日が特定できる出演予定はすべて拾ってください。
 
 出力は次の形の JSON オブジェクトのみ(前後に説明文やコードフェンスを付けない):
@@ -382,8 +411,8 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
 - venue(会場)は分かれば入れる。同じ公演を重複させない
 - 該当が無ければ events は空配列にする
 
-【公式サイト本文】
-{text[:8000]}"""
+【イベント関連テキスト】
+{_condense_for_llm(text)}"""
 
 
 def _today_jst() -> str:

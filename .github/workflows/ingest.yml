@@ -14,7 +14,8 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Groqのレート(TPM)順守で1件ごとに間隔を空けるため、全サイト巡回に余裕を持たせる
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
