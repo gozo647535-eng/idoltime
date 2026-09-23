@@ -9,6 +9,7 @@ import datetime
 import gzip
 import json
 import re
+import unicodedata
 import urllib.request
 from typing import List, Optional
 
@@ -145,8 +146,20 @@ def festival_key(url: str) -> str:
     return seg or "event"
 
 
+# アイドル名の表記ゆれ(星マーク・ハート・全角/半角・異体字セレクタ等)を吸収する
+_DECOR_RE = re.compile(
+    "[\\s　・:!?.\\-~/()+*'\"&,"
+    "★☆⭐✩✪✫✬✭✮✯✰✧✨"  # 各種の星
+    "♡♥❤♪♬♩♫"                                        # ハート・音符
+    "︀-️​-‍゙゚]"                                            # 異体字セレクタ・ゼロ幅
+)
+
+
 def _norm_name(s: str) -> str:
-    return re.sub(r"[\s　・:：!！?？★☆.\-〜~／/（）()]", "", (s or "")).lower()
+    """比較用に名前を正規化する。NFKC で全角/半角を揃えたうえで、
+    アイドル名によく使われる装飾記号を落とす(SUPER⭐︎GiRLS ↔ SUPER☆GiRLS 等)。"""
+    t = unicodedata.normalize("NFKC", s or "")
+    return _DECOR_RE.sub("", t).lower()
 
 
 def match_idol_days(day_stages, idol_name: str):

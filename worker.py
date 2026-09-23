@@ -27,7 +27,13 @@ import sb  # Supabase 入出力(標準ライブラリのみ)
 import sites  # 公式サイトからの取得エンジン(主軸)
 import timetree  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
-from watchlist import build_site_watch_list, build_timetree_watch_list, build_watch_list
+import yahoo_rt  # Yahoo!リアルタイム検索からの TicketDive イベント発見
+from watchlist import (
+    build_idol_name_list,
+    build_site_watch_list,
+    build_timetree_watch_list,
+    build_watch_list,
+)
 
 COOKIES_FILE = "cookies.json"
 
@@ -714,12 +720,122 @@ async def run_x() -> int:
     return total
 
 
+# Yahoo! リアルタイム検索で TicketDive リンクを拾うためのクエリ。
+# TicketDive は検索API・一覧・sitemap を持たないため、X 上の告知投稿からURLを
+# 見つけるのが唯一の能動発見手段。行儀よく少数クエリに留める。
+YRT_QUERIES = ["ticketdive 出演", "TicketDive チケット", "ticketdive", "t-dv.com"]
+
+
+def _artists_match_idol(artists, idol_name: str) -> bool:
+    """TicketDive の出演者一覧に idol_name が含まれるか(名前マッチのみ・LLM不使用)。"""
+    key = ticketdive._norm_name(idol_name)
+    if len(key) < 3:  # 短すぎる名前は誤マッチしやすいので対象外
+        return False
+    for a in artists or []:
+        na = ticketdive._norm_name(a)
+        if not na:
+            continue
+        if na == key or (len(key) >= 5 and key in na) or (len(na) >= 5 and na in key):
+            return True
+    return False
+
+
+def _cleanup_past_yrt(slug: str, today: str) -> int:
+    """yrt 行のうち、IDに埋めた開催日が過去のものを削除する。"""
+    removed = 0
+    ymd = today.replace("-", "")
+    try:
+        for old_id in sb.get_auto_event_ids(slug, prefix=f"yrt:{slug}:"):
+            m = re.search(r":(\d{8})$", old_id)
+            if m and m.group(1) < ymd:
+                sb.delete_auto_event(old_id)
+                removed += 1
+    except Exception as e:
+        print(f"  yrt の掃除でエラー: {e}")
+    return removed
+
+
+def run_yahoo_rt() -> int:
+    """Yahoo! リアルタイム検索で X 上の TicketDive リンクを発見し、出演者が
+    図鑑の登録グループと一致するイベントを取り込む。
+
+    TicketDive 自体には検索手段が無いため、これが対バン/フェスを含む
+    TicketDive イベントの能動発見経路になる。抽出は構造化データのみで LLM 不要。
+    """
+    idols = build_idol_name_list()
+    if not idols:
+        print("登録アイドルを取得できないため Yahoo リアルタイム取り込みをスキップ。")
+        return 0
+    urls = yahoo_rt.collect_ticketdive_urls(YRT_QUERIES)
+    if not urls:
+        print("Yahooリアルタイム: TicketDive リンクは見つかりませんでした。")
+        return 0
+    print(f"Yahooリアルタイム: TicketDive URL {len(urls)} 件を発見。出演者を照合します。")
+
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    total = 0
+    touched = set()
+    for url in urls:
+        info = _td_info(url)
+        if not info:
+            continue
+        day_stages = info.get("day_stages") or []
+        multi_day = len({d["date"] for d in day_stages}) > 1
+        for idol in idols:
+            name, slug = idol["name"], idol["idol_slug"]
+            if multi_day:
+                dates = ticketdive.match_idol_days(day_stages, name)
+            elif _artists_match_idol(info.get("artists"), name):
+                dates = [(info.get("event_datetime") or "")[:10]]
+            else:
+                dates = []
+            if not dates:
+                continue
+            fk = ticketdive.festival_key(url)
+            for dt in dates:
+                if not dt or dt < today:
+                    continue  # 終了済みの公演は取り込まない
+                row = {
+                    "tweet_id": f"yrt:{slug}:{fk}:{dt.replace('-', '')}",
+                    "idol_slug": slug,
+                    "account": None,
+                    "event_name": info.get("event_name"),
+                    "event_datetime": (
+                        dt if multi_day else normalize_event_datetime(info.get("event_datetime"))
+                    ),
+                    "open_time": info.get("open_time"),
+                    "entry_time": None,
+                    "sale_datetime": to_timestamptz(info.get("sale_datetime")),
+                    "is_first_come": bool(info.get("is_first_come")),
+                    "ticket_url": url,
+                    "ticket_types": info.get("ticket_types") or [],
+                    "max_tickets": None,
+                    "other_details": clean_venue(info.get("venue")),
+                    "raw_text": None,
+                    "tweet_url": url,
+                }
+                try:
+                    sb.upsert_auto_event(row)
+                    touched.add(slug)
+                    total += 1
+                    print(f"  → {name}: {info.get('event_name')} ({dt})")
+                except Exception as e:
+                    print(f"  書き込み失敗: {e}")
+
+    # 発見は機会依存(今日の検索に出ない=中止ではない)ので再突合削除はせず、
+    # 開催日が過ぎた行だけを掃除する。
+    removed = sum(_cleanup_past_yrt(slug, today) for slug in touched)
+    print(f"Yahooリアルタイム取り込み完了: 合計 {total} 件 / 過去分 {removed} 件削除")
+    return total
+
+
 def main() -> int:
     # X_ONLY=true は twikit(X取り込み)の動作確認用。サイト巡回/TimeTreeを飛ばしXだけ実行する。
     x_only = os.environ.get("X_ONLY", "").lower() == "true"
     if not x_only:
         run_sites()
         run_timetree()
+        run_yahoo_rt()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())
     return 0

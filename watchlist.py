@@ -177,3 +177,34 @@ def build_site_watch_list():
         print(f"idol_info の取得に失敗(サイト監視・スキップ): {e}")
 
     return watch
+
+
+def build_idol_name_list():
+    """図鑑カタログ + 有志追記から、全登録アイドルの [{idol_slug, name}] を作る。
+
+    公式サイト/TimeTree リンクの有無に関係なく全件返す。TicketDive の出演者一覧と
+    名前マッチして「このイベントにうちの登録グループが出るか」を判定するために使う。
+    """
+    seen = set()
+    out = []
+
+    def add(slug, name):
+        if not slug or not name or slug in seen:
+            return
+        out.append({"idol_slug": slug, "name": name})
+        seen.add(slug)
+
+    try:
+        catalog = sb.fetch_url_json(CATALOG_URL)
+        for idol in catalog.get("idols", []):
+            add(idol.get("slug"), idol.get("name"))
+    except Exception as e:
+        print(f"catalog.json の取得に失敗(名前リスト・スキップ): {e}")
+
+    try:
+        for payload in sb.get_approved_idol_info():
+            add(payload.get("idolSlug"), payload.get("idolName"))
+    except Exception as e:
+        print(f"idol_info の取得に失敗(名前リスト・スキップ): {e}")
+
+    return out
