@@ -61,7 +61,7 @@ if groq_api_key:
     try:
         from openai import OpenAI
         groq_client = OpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1")
-        print(f"Groq (OpenAI互換) クライアントを初期化しました。model={sites._GROQ_MODEL}")
+        print(f"Groq (OpenAI互換) クライアントを初期化しました。model候補={sites._GROQ_MODELS}")
     except Exception as e:
         print(f"Groq 初期化失敗。Gemini にフォールバックします: {e}")
 

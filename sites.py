@@ -22,7 +22,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v6: 抽出エンジンをGroq(高い無料枠)優先に切替+JSON出力形式を明記(全サイト再抽出)
 # v7: Groqのnull許容(is_first_come等)+8b-instant/テキスト量削減(TPD対策)。全サイト再抽出。
 # v8: 70bへ戻し+イベント関連行のみに凝縮してTPM(分あたりトークン)を大幅削減。全サイト再抽出。
-PROMPT_VERSION = "v8"
+# v9: Groqの旧モデル廃止(2026-08-16)で抽出が全滅していた期間の取りこぼしを回収する。
+PROMPT_VERSION = "v9"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -50,11 +51,26 @@ _quota_exhausted = [False]
 # GROQ_API_KEY が設定されていれば worker 側で優先的に使われる。
 import os as _os
 
-# 70bは品質は高いがTPD(日次10万トークン)が律速で ~34サイトで枠切れ(いぎなり等後半に届かない)。
-# 8b-instantはTPD 50万で全93をカバー可。凝縮でTPM(6千)の単発超過とJSON生成失敗も回避される。
-_GROQ_MODEL = _os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
-# 律速は TPM(分あたりトークン。8b無料枠 ≒6,000)。凝縮後 ~1.5k トークン/件を
-# 分あたり ~3-4件に抑えると TPM 内に収まるため、間隔を広めに取る。
+# Groq は無料枠のモデルを定期的に廃止する(2026-08-16 に llama-3.1-8b-instant と
+# llama-3.3-70b-versatile が廃止され、抽出が全滅した)。特定のモデル名に依存せず、
+# 候補を順に試して通ったものを使い続ける。GROQ_MODEL でカンマ区切り指定すれば上書き可。
+_GROQ_MODELS = [
+    m.strip() for m in _os.environ.get(
+        "GROQ_MODEL", "openai/gpt-oss-20b,openai/gpt-oss-120b,qwen/qwen3.6-27b"
+    ).split(",") if m.strip()
+]
+# 実行中に確定した「使えるモデル」。None の間は _GROQ_MODELS を先頭から試す。
+_groq_model_ok = [None]
+# 存在しない/権限が無いと分かったモデル(同じ失敗を繰り返さない)
+_groq_model_dead = set()
+
+
+def _groq_candidates():
+    if _groq_model_ok[0]:
+        return [_groq_model_ok[0]]
+    return [m for m in _GROQ_MODELS if m not in _groq_model_dead]
+
+
 _GROQ_MIN_INTERVAL = 16.0  # 秒 → 最大 ~3.7 req/分(8bのTPM 6,000内に収める)
 _groq_last_call = [0.0]
 _groq_quota_exhausted = [False]
@@ -433,15 +449,39 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
     for attempt in range(3):
         try:
             _groq_throttle()
-            res = groq_client.chat.completions.create(
-                model=_GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": "あなたはイベント情報抽出器です。指示されたJSONオブジェクトのみを返します。"},
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.1,
-            )
+            cands = _groq_candidates()
+            if not cands:
+                print("    Groq: 使えるモデルがありません(全候補が利用不可)")
+                return None
+            res = None
+            last_404 = None
+            for model in cands:
+                try:
+                    res = groq_client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "あなたはイベント情報抽出器です。指示されたJSONオブジェクトのみを返します。"},
+                            {"role": "user", "content": prompt},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                    )
+                except Exception as me:
+                    msg_m = str(me)
+                    if "model_not_found" in msg_m or "does not exist" in msg_m:
+                        # 廃止済みモデル。以後は試さず次の候補へ。
+                        _groq_model_dead.add(model)
+                        last_404 = msg_m
+                        print(f"    Groq: モデル {model} は利用不可。次の候補を試します")
+                        continue
+                    raise
+                if _groq_model_ok[0] != model:
+                    _groq_model_ok[0] = model
+                    print(f"    Groq: モデル {model} を使用します")
+                break
+            if res is None:
+                print(f"    Groq: 全モデル候補が利用不可: {last_404}")
+                return None
             raw = res.choices[0].message.content or "{}"
             data = json.loads(raw)
             return SiteExtraction(**data).events
