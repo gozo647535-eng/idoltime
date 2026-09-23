@@ -23,7 +23,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v7: Groqのnull許容(is_first_come等)+8b-instant/テキスト量削減(TPD対策)。全サイト再抽出。
 # v8: 70bへ戻し+イベント関連行のみに凝縮してTPM(分あたりトークン)を大幅削減。全サイト再抽出。
 # v9: Groqの旧モデル廃止(2026-08-16)で抽出が全滅していた期間の取りこぼしを回収する。
-PROMPT_VERSION = "v9"
+# v10: JSONモード非対応モデルへのフォールバックを追加し、失敗していたサイトを再抽出する。
+PROMPT_VERSION = "v10"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -63,6 +64,23 @@ _GROQ_MODELS = [
 _groq_model_ok = [None]
 # 存在しない/権限が無いと分かったモデル(同じ失敗を繰り返さない)
 _groq_model_dead = set()
+
+
+# JSONモードを受け付けないモデルがある(gpt-oss-20b は response_format 指定だと
+# "Failed to validate JSON" で400になる)。その場合は素の生成に切り替えるため記録する。
+_groq_no_json_mode = set()
+
+
+def _lenient_json(raw: str):
+    """コードフェンスや前後の説明が混じっていてもJSONオブジェクトを取り出す。"""
+    import json as _json
+    t = (raw or "").strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t)
+    t = re.sub(r"\s*```$", "", t)
+    i, j = t.find("{"), t.rfind("}")
+    if i >= 0 and j > i:
+        t = t[i:j + 1]
+    return _json.loads(t)
 
 
 def _groq_candidates():
@@ -454,36 +472,49 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                 print("    Groq: 使えるモデルがありません(全候補が利用不可)")
                 return None
             res = None
-            last_404 = None
+            last_err = None
             for model in cands:
-                try:
-                    res = groq_client.chat.completions.create(
+                # JSONモード → 失敗したら素の生成、の順で試す
+                modes = [False] if model in _groq_no_json_mode else [True, False]
+                for strict in modes:
+                    kwargs = dict(
                         model=model,
                         messages=[
                             {"role": "system", "content": "あなたはイベント情報抽出器です。指示されたJSONオブジェクトのみを返します。"},
                             {"role": "user", "content": prompt},
                         ],
-                        response_format={"type": "json_object"},
                         temperature=0.1,
                     )
-                except Exception as me:
-                    msg_m = str(me)
-                    if "model_not_found" in msg_m or "does not exist" in msg_m:
-                        # 廃止済みモデル。以後は試さず次の候補へ。
-                        _groq_model_dead.add(model)
-                        last_404 = msg_m
-                        print(f"    Groq: モデル {model} は利用不可。次の候補を試します")
-                        continue
-                    raise
-                if _groq_model_ok[0] != model:
-                    _groq_model_ok[0] = model
-                    print(f"    Groq: モデル {model} を使用します")
-                break
+                    if strict:
+                        kwargs["response_format"] = {"type": "json_object"}
+                    try:
+                        res = groq_client.chat.completions.create(**kwargs)
+                        break
+                    except Exception as me:
+                        msg_m = str(me)
+                        last_err = msg_m
+                        if "model_not_found" in msg_m or "does not exist" in msg_m:
+                            _groq_model_dead.add(model)
+                            print(f"    Groq: モデル {model} は利用不可。次の候補を試します")
+                            res = None
+                            break  # このモデルは諦めて次の候補へ
+                        if strict and ("validate JSON" in msg_m or "json_validate_failed" in msg_m):
+                            # このモデルはJSONモード非対応。以後は素の生成で呼ぶ。
+                            _groq_no_json_mode.add(model)
+                            print(f"    Groq: モデル {model} はJSONモード非対応。素の生成で再試行します")
+                            res = None
+                            continue
+                        raise
+                if res is not None:
+                    if _groq_model_ok[0] != model:
+                        _groq_model_ok[0] = model
+                        print(f"    Groq: モデル {model} を使用します")
+                    break
             if res is None:
-                print(f"    Groq: 全モデル候補が利用不可: {last_404}")
+                print(f"    Groq: 全モデル候補が利用不可: {last_err}")
                 return None
             raw = res.choices[0].message.content or "{}"
-            data = json.loads(raw)
+            data = _lenient_json(raw)
             return SiteExtraction(**data).events
         except Exception as e:
             msg = str(e)
