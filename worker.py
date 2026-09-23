@@ -27,7 +27,8 @@ import sb  # Supabase 入出力(標準ライブラリのみ)
 import sites  # 公式サイトからの取得エンジン(主軸)
 import timetree  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
-import yahoo_rt  # Yahoo!リアルタイム検索からの TicketDive イベント発見
+import ticketsite  # LivePocket / TiGET イベントページの構造化パーサ
+import yahoo_rt  # Yahoo!リアルタイム検索からのチケットサイト・イベント発見
 from watchlist import (
     build_idol_name_list,
     build_site_watch_list,
@@ -720,10 +721,17 @@ async def run_x() -> int:
     return total
 
 
-# Yahoo! リアルタイム検索で TicketDive リンクを拾うためのクエリ。
+# Yahoo! リアルタイム検索でチケットサイトのリンクを拾うためのクエリ。
 # TicketDive は検索API・一覧・sitemap を持たないため、X 上の告知投稿からURLを
-# 見つけるのが唯一の能動発見手段。行儀よく少数クエリに留める。
-YRT_QUERIES = ["ticketdive 出演", "TicketDive チケット", "ticketdive", "t-dv.com"]
+# 見つけるのが唯一の能動発見手段。LivePocket / TiGET も同じ経路で拾う。
+# 行儀よく少数クエリに留める。
+YRT_QUERIES = [
+    # アイドル文脈のクエリが最も歩留まりが良い(対バン1本で登録グループが十数件一致する)
+    "tiget アイドル", "livepocket アイドル", "ticketdive アイドル",
+    "アイドル 対バン チケット", "アイドル 定期公演 チケット",
+    # サイト横断の取りこぼし拾い
+    "ticketdive 出演", "tiget 出演", "livepocket 出演",
+]
 
 
 def _artists_match_idol(artists, idol_name: str) -> bool:
@@ -755,72 +763,89 @@ def _cleanup_past_yrt(slug: str, today: str) -> int:
     return removed
 
 
-def run_yahoo_rt() -> int:
-    """Yahoo! リアルタイム検索で X 上の TicketDive リンクを発見し、出演者が
-    図鑑の登録グループと一致するイベントを取り込む。
+def _event_key(source: str, url: str) -> str:
+    """イベント行のIDに使う識別子。サイト間で衝突しないよう接頭辞を付ける。"""
+    if source == "ticketdive":
+        return ticketdive.festival_key(url)
+    seg = (url or "").rstrip("/").split("/")[-1].split("?")[0]
+    return f"{'lp' if source == 'livepocket' else 'tg'}-{seg}"
 
-    TicketDive 自体には検索手段が無いため、これが対バン/フェスを含む
-    TicketDive イベントの能動発見経路になる。抽出は構造化データのみで LLM 不要。
+
+def _build_yrt_row(slug: str, source: str, url: str, info: dict, dt: str, multi_day: bool) -> dict:
+    return {
+        "tweet_id": f"yrt:{slug}:{_event_key(source, url)}:{dt.replace('-', '')}",
+        "idol_slug": slug,
+        "account": None,
+        "event_name": info.get("event_name"),
+        "event_datetime": dt if multi_day else normalize_event_datetime(info.get("event_datetime")),
+        "open_time": info.get("open_time"),
+        "entry_time": None,
+        "sale_datetime": to_timestamptz(info.get("sale_datetime")),
+        "is_first_come": bool(info.get("is_first_come")),
+        "ticket_url": url,
+        "ticket_types": info.get("ticket_types") or [],
+        "max_tickets": None,
+        "other_details": clean_venue(info.get("venue")),
+        "raw_text": None,
+        "tweet_url": url,
+    }
+
+
+def _match_dates(source: str, info: dict, name: str, today: str):
+    """このイベントで idol が出演する日付(YYYY-MM-DD)を返す。名前マッチのみ。"""
+    if source == "ticketdive":
+        day_stages = info.get("day_stages") or []
+        if len({d["date"] for d in day_stages}) > 1:
+            return ticketdive.match_idol_days(day_stages, name), True
+        matched = _artists_match_idol(info.get("artists"), name)
+    else:
+        matched = _artists_match_idol(info.get("performers"), name)
+        if not matched and info.get("act_labeled"):
+            # 出演欄が自由文で分割しきれない場合に備え、出演欄テキストへの部分一致も見る
+            key = ticketdive._norm_name(name)
+            matched = len(key) >= 4 and key in ticketdive._norm_name(info.get("act_text") or "")
+    return ([(info.get("event_datetime") or "")[:10]] if matched else []), False
+
+
+def run_yahoo_rt() -> int:
+    """Yahoo! リアルタイム検索で X 上のチケットサイト(TicketDive / LivePocket / TiGET)の
+    リンクを発見し、出演者が図鑑の登録グループと一致するイベントを取り込む。
+
+    TicketDive には検索手段が無く、LivePocket / TiGET もグループ単位の巡回は用意が無いため、
+    これが対バン/フェスを含むイベントの能動発見経路になる。抽出は構造化データのみで LLM 不要。
     """
     idols = build_idol_name_list()
     if not idols:
         print("登録アイドルを取得できないため Yahoo リアルタイム取り込みをスキップ。")
         return 0
-    urls = yahoo_rt.collect_ticketdive_urls(YRT_QUERIES)
-    if not urls:
-        print("Yahooリアルタイム: TicketDive リンクは見つかりませんでした。")
+    by_site = yahoo_rt.collect_event_urls(YRT_QUERIES)
+    total_urls = sum(len(v) for v in by_site.values())
+    if not total_urls:
+        print("Yahooリアルタイム: チケットサイトのリンクは見つかりませんでした。")
         return 0
-    print(f"Yahooリアルタイム: TicketDive URL {len(urls)} 件を発見。出演者を照合します。")
+    print("Yahooリアルタイム: " + " / ".join(f"{k} {len(v)}件" for k, v in by_site.items()))
 
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     total = 0
     touched = set()
-    for url in urls:
-        info = _td_info(url)
-        if not info:
-            continue
-        day_stages = info.get("day_stages") or []
-        multi_day = len({d["date"] for d in day_stages}) > 1
-        for idol in idols:
-            name, slug = idol["name"], idol["idol_slug"]
-            if multi_day:
-                dates = ticketdive.match_idol_days(day_stages, name)
-            elif _artists_match_idol(info.get("artists"), name):
-                dates = [(info.get("event_datetime") or "")[:10]]
-            else:
-                dates = []
-            if not dates:
+    for source, urls in by_site.items():
+        for url in urls:
+            info = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
+            if not info:
                 continue
-            fk = ticketdive.festival_key(url)
-            for dt in dates:
-                if not dt or dt < today:
-                    continue  # 終了済みの公演は取り込まない
-                row = {
-                    "tweet_id": f"yrt:{slug}:{fk}:{dt.replace('-', '')}",
-                    "idol_slug": slug,
-                    "account": None,
-                    "event_name": info.get("event_name"),
-                    "event_datetime": (
-                        dt if multi_day else normalize_event_datetime(info.get("event_datetime"))
-                    ),
-                    "open_time": info.get("open_time"),
-                    "entry_time": None,
-                    "sale_datetime": to_timestamptz(info.get("sale_datetime")),
-                    "is_first_come": bool(info.get("is_first_come")),
-                    "ticket_url": url,
-                    "ticket_types": info.get("ticket_types") or [],
-                    "max_tickets": None,
-                    "other_details": clean_venue(info.get("venue")),
-                    "raw_text": None,
-                    "tweet_url": url,
-                }
-                try:
-                    sb.upsert_auto_event(row)
-                    touched.add(slug)
-                    total += 1
-                    print(f"  → {name}: {info.get('event_name')} ({dt})")
-                except Exception as e:
-                    print(f"  書き込み失敗: {e}")
+            for idol in idols:
+                name, slug = idol["name"], idol["idol_slug"]
+                dates, multi_day = _match_dates(source, info, name, today)
+                for dt in dates:
+                    if not dt or dt < today:
+                        continue  # 終了済みの公演は取り込まない
+                    try:
+                        sb.upsert_auto_event(_build_yrt_row(slug, source, url, info, dt, multi_day))
+                        touched.add(slug)
+                        total += 1
+                        print(f"  → [{source}] {name}: {info.get('event_name')} ({dt})")
+                    except Exception as e:
+                        print(f"  書き込み失敗: {e}")
 
     # 発見は機会依存(今日の検索に出ない=中止ではない)ので再突合削除はせず、
     # 開催日が過ぎた行だけを掃除する。

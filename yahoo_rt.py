@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 from typing import Dict, List
 
+import ticketsite
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
@@ -30,6 +32,13 @@ _last_call = [0.0]
 TICKETDIVE_RE = re.compile(
     r"https?://(?:ticketdive\.com/event/[A-Za-z0-9_\-]+|t-dv\.com/[A-Za-z0-9_\-]+)"
 )
+
+# 収集対象のチケットサイト。値は URL の正規表現。
+SITE_PATTERNS = {
+    "ticketdive": TICKETDIVE_RE,
+    "livepocket": ticketsite.LIVEPOCKET_RE,
+    "tiget": ticketsite.TIGET_RE,
+}
 
 
 def _throttle():
@@ -111,3 +120,31 @@ def collect_ticketdive_urls(queries: List[str], limit: int = 60) -> List[str]:
                     print(f"  上限 {limit} 件に達したため打ち切り")
                     return list(found)
     return list(found)
+
+
+def collect_event_urls(queries: List[str], limit_per_site: int = 60) -> Dict[str, List[str]]:
+    """複数クエリを検索し、チケットサイトごとにイベントURLを重複なく集めて返す。
+
+    同一イベントを指す短縮URLと正規URLは、末尾の識別子で重複排除する。
+    """
+    found: Dict[str, Dict[str, None]] = {k: {} for k in SITE_PATTERNS}
+    seen_keys: Dict[str, set] = {k: set() for k in SITE_PATTERNS}
+    for q in queries:
+        posts = search_posts(q)
+        hits = 0
+        for e in posts:
+            for u in _urls_in_post(e):
+                for site, pat in SITE_PATTERNS.items():
+                    m = pat.match(u)
+                    if not m:
+                        continue
+                    clean = m.group(0)  # 追跡パラメータを落とす
+                    key = clean.rstrip("/").split("/")[-1]
+                    if key in seen_keys[site] or len(found[site]) >= limit_per_site:
+                        continue
+                    seen_keys[site].add(key)
+                    found[site][clean] = None
+                    hits += 1
+                    break
+        print(f"  Yahooリアルタイム「{q}」: {len(posts)} 投稿 / 新規 {hits} 件")
+    return {k: list(v) for k, v in found.items()}
