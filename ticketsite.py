@@ -11,6 +11,7 @@
 そこでサイト差をこのモジュールで吸収し、同じ形の dict を返す。
 """
 import gzip
+import html as _html
 import re
 import time
 import urllib.request
@@ -144,15 +145,17 @@ def _act_text(description: str):
 
 # 出演者欄に紛れ込む注意書き・料金・時刻などを弾くための特徴
 _NOT_A_NAME = re.compile(
-    r"(?:[¥￥]|\d+\s*円|https?://|[@＠]\w|[※⚠]|[【】]|お問い?合わせ|受付|予約|決済|"
-    r"キャンセル|変更|入場|整理番号|ドリンク|物販|特典|開場|開演|終演|OPEN|START|DOOR|ADV)",
+    r"(?:[¥￥]|\d+\s*円|https?://|[@＠]\w|[※⚠]|[【】<>]|お問い?合わせ|受付|予約|決済|"
+    r"キャンセル|変更|入場|整理番号|ドリンク|物販|特典|開場|開演|終演|公式|タイトル|開催日|"
+    r"OPEN|START|DOOR|ADV|href)",
     re.IGNORECASE)
 
 
 def _split_performers(s: str) -> List[str]:
     """出演者欄を名前らしい単位に割る。自由文なので、明らかに名前でない行は捨てる。"""
     out = []
-    for p in re.split(r"[/／,、\n・]+", s or ""):
+    # description には HTML エンティティがそのまま残っていることがある(&quot; &lt;a href= 等)
+    for p in re.split(r"[/／,、\n・]+", _html.unescape(s or "")):
         p = re.sub(r"\s+", " ", p).strip(" \t:：-—–")
         if not p or len(p) > 30:
             continue
@@ -161,6 +164,10 @@ def _split_performers(s: str) -> List[str]:
         if not re.search(r"[0-9A-Za-zぁ-んァ-ヶ一-龥]", p):
             continue
         if re.fullmatch(r"[\d\s:：時分番〜~\-]+", p):  # 時刻・整理番号だけの断片
+            continue
+        if p.endswith("。") or "、" in p:  # 説明文であって名前ではない
+            continue
+        if re.search(r"\d{4}年|\d{1,2}月\d{1,2}日", p):  # 日付の断片
             continue
         out.append(p)
     return out
