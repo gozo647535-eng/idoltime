@@ -484,6 +484,7 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                             {"role": "user", "content": prompt},
                         ],
                         temperature=0.1,
+                        max_tokens=2048,
                     )
                     if strict:
                         kwargs["response_format"] = {"type": "json_object"}
@@ -520,9 +521,11 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
             msg = str(e)
             is_quota = "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower()
             if is_quota and attempt < 2:
+                # Groq のレート上限は分単位の窓なので、指示が読めない時は
+                # 窓が切り替わるまで待つ(20秒では明けず、無駄に打ち切っていた)。
                 m = re.search(r"try again in ([\d.]+)s", msg)
-                wait = min(float(m.group(1)) + 1, 65) if m else 20
-                print(f"    Groq 429(レート上限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2)")
+                wait = min(float(m.group(1)) + 1, 65) if m else 65
+                print(f"    Groq 429(レート上限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2): {msg[:180]}")
                 time.sleep(wait)
                 continue
             if is_quota:
