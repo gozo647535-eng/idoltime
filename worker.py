@@ -807,6 +807,10 @@ def _match_dates(source: str, info: dict, name: str, today: str):
     return ([(info.get("event_datetime") or "")[:10]] if matched else []), False
 
 
+def _yrt_cache_key(source: str, url: str) -> str:
+    return f"yrtu:{source}:{_event_key(source, url)}"
+
+
 def run_yahoo_rt() -> int:
     """Yahoo! リアルタイム検索で X 上のチケットサイト(TicketDive / LivePocket / TiGET)の
     リンクを発見し、出演者が図鑑の登録グループと一致するイベントを取り込む。
@@ -828,11 +832,25 @@ def run_yahoo_rt() -> int:
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     total = 0
     touched = set()
+    skipped = 0
     for source, urls in by_site.items():
         for url in urls:
+            # 同じイベントは何度も出回るので、当日すでに取り込んだURLは再取得しない
+            # (高頻度実行でも相手サイトへの負荷と実行時間を増やさないため)
+            cache_key = _yrt_cache_key(source, url)
+            try:
+                if sb.get_last_seen(cache_key) == today:
+                    skipped += 1
+                    continue
+            except Exception:
+                pass
             info = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
             if not info:
                 continue
+            try:
+                sb.set_last_seen(cache_key, today)
+            except Exception:
+                pass
             for idol in idols:
                 name, slug = idol["name"], idol["idol_slug"]
                 dates, multi_day = _match_dates(source, info, name, today)
@@ -850,13 +868,20 @@ def run_yahoo_rt() -> int:
     # 発見は機会依存(今日の検索に出ない=中止ではない)ので再突合削除はせず、
     # 開催日が過ぎた行だけを掃除する。
     removed = sum(_cleanup_past_yrt(slug, today) for slug in touched)
-    print(f"Yahooリアルタイム取り込み完了: 合計 {total} 件 / 過去分 {removed} 件削除")
+    print(f"Yahooリアルタイム取り込み完了: 合計 {total} 件 / "
+          f"当日取得済みスキップ {skipped} 件 / 過去分 {removed} 件削除")
     return total
 
 
 def main() -> int:
     # X_ONLY=true は twikit(X取り込み)の動作確認用。サイト巡回/TimeTreeを飛ばしXだけ実行する。
     x_only = os.environ.get("X_ONLY", "").lower() == "true"
+    # DISCOVERY_ONLY=true はチケットサイト発見だけを回す軽量モード(数分)。
+    # 重いサイト巡回(Groqのレート順守で約30分)を挟まずに済むので、高頻度で実行できる。
+    discovery_only = os.environ.get("DISCOVERY_ONLY", "").lower() == "true"
+    if discovery_only:
+        run_yahoo_rt()
+        return 0
     if not x_only:
         run_sites()
         run_timetree()
