@@ -25,7 +25,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v9: Groqの旧モデル廃止(2026-08-16)で抽出が全滅していた期間の取りこぼしを回収する。
 # v10: JSONモード非対応モデルへのフォールバックを追加し、失敗していたサイトを再抽出する。
 # v11: 0件のまま固定化していたサイト(RE-GE等)を取り直す。
-PROMPT_VERSION = "v11"
+# v12: スケジュール用サブページもJS描画するようにし、カレンダーページを読めるようにする。
+PROMPT_VERSION = "v12"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -156,6 +157,30 @@ def _find_subpages(html: str, base_url: str) -> List[str]:
         if len(found) >= 3:
             break
     return found
+
+
+def _render_page(url: str) -> Optional[str]:
+    """1ページだけヘッドレスChromiumで描画して生HTMLを返す。失敗時 None。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            try:
+                page = browser.new_page(user_agent=UA)
+                page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                return page.content()
+            finally:
+                browser.close()
+    except Exception as e:
+        print(f"    JSレンダリング失敗(サブ) {url}: {e}")
+        return None
 
 
 def _render_site(site_url: str) -> List[str]:
@@ -597,6 +622,23 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
     return None
 
 
+def _fetch_subpage(url: str):
+    """サブページを取得する。静的の可視テキストが薄ければ JS 描画で取り直す。
+
+    トップが充実していてもスケジュールだけカレンダー用の別ページにあり、そこが
+    JS 描画という作りが多い(いぎなり東北産の /vertical_calendar など)。
+    静的取得だけでは公演日がまったく拾えないので、そこだけ描画する。
+    """
+    h = _get(url)
+    if h is not None and len(_html_to_text(h)) >= RENDER_MIN_CHARS:
+        return h
+    rendered = _render_page(url)
+    if rendered and len(_html_to_text(rendered)) > len(_html_to_text(h) if h else ""):
+        print(f"    JS描画でサブページ取得: {url}")
+        return rendered
+    return h
+
+
 def fetch_site_content(site_url: str):
     """公式サイト(+ News/Schedule サブページ)を取得し (content_hash, combined_text, jsonld_events)
     を返す。取得できなければ (None, '', [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
@@ -621,13 +663,13 @@ def fetch_site_content(site_url: str):
             if home:
                 htmls.append(home)
             for sub in (_find_subpages(home, site_url) if home else []):
-                h = _get(sub)
+                h = _fetch_subpage(sub)
                 if h:
                     htmls.append(h)
     else:
         htmls = [home]
         for sub in _find_subpages(home, site_url):
-            h = _get(sub)
+            h = _fetch_subpage(sub)
             if h:
                 htmls.append(h)
 
