@@ -24,7 +24,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v8: 70bへ戻し+イベント関連行のみに凝縮してTPM(分あたりトークン)を大幅削減。全サイト再抽出。
 # v9: Groqの旧モデル廃止(2026-08-16)で抽出が全滅していた期間の取りこぼしを回収する。
 # v10: JSONモード非対応モデルへのフォールバックを追加し、失敗していたサイトを再抽出する。
-PROMPT_VERSION = "v10"
+# v11: 0件のまま固定化していたサイト(RE-GE等)を取り直す。
+PROMPT_VERSION = "v11"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -654,3 +655,34 @@ def fetch_site_content(site_url: str):
         (PROMPT_VERSION + "\n" + combined + "\n" + ld_sig).encode("utf-8", "ignore")
     ).hexdigest()
     return content_hash, combined, jsonld_events
+
+
+def has_future_dates(text: str) -> bool:
+    """本文に今日以降(1年以内)の日付が含まれるか。
+
+    抽出が 0 件で返ったとき、その素材に今後の日付すら無いなら「本当に予定が無い」。
+    日付があるのに 0 件なら取りこぼしを疑い、呼び出し側で再試行の判断に使う。
+    """
+    import datetime as _dt
+
+    if not text:
+        return False
+    today = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).date()
+    limit = today + _dt.timedelta(days=365)
+    for m in re.finditer(r"(20\d\d)[/年.\-](\d{1,2})[/月.\-](\d{1,2})", text):
+        try:
+            d = _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+        if today <= d <= limit:
+            return True
+    # 年を伴わない「11/14」「8月20日」等。年跨ぎを考え今年と翌年で判定する。
+    for m in re.finditer(r"(?<!\d)(\d{1,2})[/月](\d{1,2})日?(?!\d)", text):
+        for y in (today.year, today.year + 1):
+            try:
+                d = _dt.date(y, int(m.group(1)), int(m.group(2)))
+            except ValueError:
+                continue
+            if today <= d <= limit:
+                return True
+    return False

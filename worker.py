@@ -561,10 +561,16 @@ def run_sites() -> int:
         if content_hash is None:
             continue
         state_key = f"site:{slug}"
-        # 本文/構造化データに変化が無ければ Gemini を呼ばずにスキップ(無料枠の節約)
-        if sb.get_last_seen(state_key) == content_hash:
+        # 本文/構造化データに変化が無ければ LLM を呼ばずにスキップ(無料枠の節約)。
+        # ただし「本文に今後の日付があるのに抽出0件」だった回は <hash>|z1 を記録してあり、
+        # 内容が同じでも一度だけ取り直す(取りこぼしがそのまま固定化するのを防ぐ)。
+        seen = sb.get_last_seen(state_key)
+        if seen == content_hash:
             print("  変更なし。スキップ")
             continue
+        retry_zero = seen == f"{content_hash}|z1"
+        if retry_zero:
+            print("  前回0件だったため再抽出します")
         llm_events = sites.extract_events_any(groq_client, gemini_client, name, combined)
         llm_ok = llm_events is not None
         if not llm_ok:
@@ -598,8 +604,13 @@ def run_sites() -> int:
                         removed += 1
             except Exception as e:
                 print(f"  再突合(削除)でエラー: {e}")
-            sb.set_last_seen(state_key, content_hash)
-            print(f"  {count} 件反映 / {removed} 件削除")
+            if count == 0 and not retry_zero and sites.has_future_dates(combined):
+                # 素材に今後の日付があるのに1件も取れていない → 次回もう一度だけ試す
+                sb.set_last_seen(state_key, f"{content_hash}|z1")
+                print("  0 件(本文に今後の日付あり)。次回もう一度抽出します")
+            else:
+                sb.set_last_seen(state_key, content_hash)
+                print(f"  {count} 件反映 / {removed} 件削除")
         else:
             # LLM一時失敗: JSON-LD分だけ即反映。削除・状態更新はせず次回再試行する
             # (既存のLLM由来イベントを枠切れで消さないため、reconcileとhash更新は行わない)
