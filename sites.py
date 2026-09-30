@@ -26,7 +26,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v10: JSONモード非対応モデルへのフォールバックを追加し、失敗していたサイトを再抽出する。
 # v11: 0件のまま固定化していたサイト(RE-GE等)を取り直す。
 # v12: スケジュール用サブページもJS描画するようにし、カレンダーページを読めるようにする。
-PROMPT_VERSION = "v12"
+# v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
+PROMPT_VERSION = "v13"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -437,20 +438,48 @@ _EVENT_SIGNAL = re.compile(
 )
 
 
+# 予定と無関係で、しかもイベント語を含むために凝縮をすり抜けてしまう行
+_CONDENSE_NOISE = re.compile(
+    r"(WALLPAPER|壁紙|お絵かき|伝言板|セットリスト|SETLIST|メンバー紹介|プロフィール|"
+    r"ディスコグラ|DISCOGRAPHY|MAGAZINE|GOODS|グッズ|通販|抽選結果|会員|ファンクラブ)",
+    re.IGNORECASE)
+
+
 def _condense_for_llm(text: str, limit: int = 2000) -> str:
-    """LLMへ渡す前に、イベント関連(日付・時刻・チケット・公演)の行だけを前後1行の文脈付きで
-    抽出し、トークン量を大幅に削減する(Groq無料枠のTPM=分あたりトークン上限対策)。
-    シグナルが乏しいページは元テキスト先頭を返す(取りこぼし防止)。"""
+    """LLM へ渡す前に、イベント関連の箇所だけを抜き出してトークン量を削る
+    (無料枠の分/日あたり上限への対策)。
+
+    限られた字数に何を残すかが肝心で、素直に先頭から詰めると、新着のお知らせや
+    壁紙・セットリストで埋まり、肝心のスケジュールが押し出される。そこで
+    **今後の日付を含むかたまりを先に**入れ、余った分を他のイベント行で埋める。
+    日付と公演名は別の行に分かれていることが多いので、前後1行をひとかたまりとして
+    扱い、組にしたまま残す(日付だけが並んで名前が消えるのを防ぐ)。
+    """
     lines = text.split("\n")
-    keep = set()
+    blocks = []
     for i, ln in enumerate(lines):
-        if _EVENT_SIGNAL.search(ln):
-            for j in range(max(0, i - 1), min(len(lines), i + 2)):
-                keep.add(j)
-    if len(keep) < 3:
+        if _EVENT_SIGNAL.search(ln) and not _CONDENSE_NOISE.search(ln):
+            blocks.append(range(max(0, i - 1), min(len(lines), i + 2)))
+    if len(blocks) < 2:
         return text[:limit]
-    picked = "\n".join(lines[i] for i in sorted(keep))
-    return picked[:limit]
+
+    picked, used = set(), 0
+
+    def take(block):
+        nonlocal used
+        new = [i for i in block if i not in picked]
+        size = sum(len(lines[i]) + 1 for i in new)
+        if not new or used + size > limit:
+            return
+        picked.update(new)
+        used += size
+
+    for b in blocks:  # まず今後の日付を含むかたまり
+        if any(has_future_dates(lines[i]) for i in b):
+            take(b)
+    for b in blocks:  # 余力で残りのイベント行
+        take(b)
+    return "\n".join(lines[i] for i in sorted(picked))
 
 
 def _build_extract_prompt(name: str, text: str, today: str) -> str:
