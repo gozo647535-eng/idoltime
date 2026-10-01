@@ -87,8 +87,39 @@ def _pydantic_error():
         return _None
 
 
+def _escape_inner_quotes(t: str) -> str:
+    """文字列値の中に素のまま現れた二重引用符をエスケープする。
+
+    JSONモードを受け付けないモデルは、イベント名に含まれる " をそのまま書いてしまい
+    JSON 全体が壊れる。閉じ引用符なら直後が , : } ] のいずれかになるはずなので、
+    そうでない " は値の一部とみなして \" に直す。
+    """
+    out = []
+    in_str = False
+    i = 0
+    while i < len(t):
+        ch = t[i]
+        if ch == "\\" and in_str and i + 1 < len(t):
+            out.append(t[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            if not in_str:
+                in_str = True
+            else:
+                nxt = next((c for c in t[i + 1:] if not c.isspace()), "")
+                if nxt in ",:}]" or nxt == "":
+                    in_str = False
+                else:
+                    out.append("\\")  # 値の途中の " → エスケープして残す
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _lenient_json(raw: str):
-    """コードフェンスや前後の説明が混じっていてもJSONオブジェクトを取り出す。"""
+    """コードフェンスや前後の説明が混じっていてもJSONオブジェクトを取り出す。
+    素の引用符で壊れている場合は直してからもう一度読む。"""
     import json as _json
     t = (raw or "").strip()
     t = re.sub(r"^```(?:json)?\s*", "", t)
@@ -96,7 +127,10 @@ def _lenient_json(raw: str):
     i, j = t.find("{"), t.rfind("}")
     if i >= 0 and j > i:
         t = t[i:j + 1]
-    return _json.loads(t)
+    try:
+        return _json.loads(t)
+    except ValueError:
+        return _json.loads(_escape_inner_quotes(t))
 
 
 def _groq_candidates():
