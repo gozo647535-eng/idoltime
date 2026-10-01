@@ -490,9 +490,19 @@ async def check_account(username: str, idol_slug: str) -> int:
     return processed
 
 
+# 「先行受付」「一般発売」等は公演ではなくチケット情報。プロンプトでも禁じているが、
+# モデルが取り違えることがあるので、ここでも落とす。
+# ただし「発売記念イベント」「特典会」のように実際に客が集まる催しは残す。
+_RECEPTION_ONLY = re.compile(r"(受付|先行発売|一般発売|プレイガイド|抽選申込|二次先行|チケット発売)")
+_REAL_GATHERING = re.compile(r"(イベント|特典会|ライブ|LIVE|公演|フェス|生誕|ワンマン|ツアー|握手|お話し?会|撮影会)", re.IGNORECASE)
+
+
 def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
     """公式サイト由来の SiteEvent を auto_events 行に変換。tweet_id は合成した安定IDで重複排除。"""
     if not ev.event_name:
+        return None
+    if _RECEPTION_ONLY.search(ev.event_name) and not _REAL_GATHERING.search(ev.event_name):
+        print(f"  チケット受付のためイベントにしません: {ev.event_name[:40]}")
         return None
     sale = None
     if ev.sale_datetime:
