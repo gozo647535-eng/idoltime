@@ -62,7 +62,7 @@ import os as _os
 # 候補を順に試して通ったものを使い続ける。GROQ_MODEL でカンマ区切り指定すれば上書き可。
 _GROQ_MODELS = [
     m.strip() for m in _os.environ.get(
-        "GROQ_MODEL", "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.6-27b"
+        "GROQ_MODEL", "openai/gpt-oss-120b,openai/gpt-oss-20b"
     ).split(",") if m.strip()
 ]
 # 実行中に確定した「使えるモデル」。None の間は _GROQ_MODELS を先頭から試す。
@@ -119,6 +119,24 @@ def _escape_inner_quotes(t: str) -> str:
     return "".join(out)
 
 
+def _salvage_truncated(t: str):
+    """出力が max_tokens で途中で切れた JSON を、最後に完結した要素までで救う。"""
+    import json as _json
+    ends = [m.end() for m in re.finditer(r"\}", t)][-40:]
+    for end in reversed(ends):
+        head = t[:end]
+        for closing in ("]}", "}]}"):
+            for cand in (head + closing, _escape_inner_quotes(head) + closing):
+                try:
+                    data = _json.loads(cand)
+                except ValueError:
+                    continue
+                if isinstance(data, dict) and isinstance(data.get("events"), list):
+                    print(f"    Groq: 出力が途中で切れていたため {len(data['events'])} 件まで救出しました")
+                    return data
+    return None
+
+
 def _lenient_json(raw: str):
     """コードフェンスや前後の説明が混じっていてもJSONオブジェクトを取り出す。
     素の引用符で壊れている場合は直してからもう一度読む。"""
@@ -129,16 +147,63 @@ def _lenient_json(raw: str):
     i, j = t.find("{"), t.rfind("}")
     if i >= 0 and j > i:
         t = t[i:j + 1]
+    for cand in (t, _escape_inner_quotes(t)):
+        try:
+            return _json.loads(cand)
+        except ValueError:
+            pass
+    salvaged = _salvage_truncated(t)
+    if salvaged is not None:
+        return salvaged
+    return _json.loads(_escape_inner_quotes(t))  # 元の例外を投げ直す
+
+
+# API から取得した実在モデル一覧(候補を推測で書くと存在しないモデルで詰む)
+_groq_discovered = [None]
+
+_GROQ_SKIP_KINDS = ("whisper", "tts", "guard", "embed", "safety", "moderation", "vision")
+_GROQ_PREFER = ("gpt-oss-120b", "gpt-oss-20b", "llama-4", "llama-3.3", "llama",
+                "qwen", "kimi", "deepseek", "mixtral", "gemma")
+
+
+def _groq_discover(client) -> List[str]:
+    """Groq で実際に使えるチャットモデルを一覧取得する(廃止・改名に追従するため)。"""
+    if _groq_discovered[0] is not None:
+        return _groq_discovered[0]
+    ids: List[str] = []
     try:
-        return _json.loads(t)
-    except ValueError:
-        return _json.loads(_escape_inner_quotes(t))
+        for m in client.models.list().data:
+            mid = getattr(m, "id", "") or ""
+            low = mid.lower()
+            if not mid or any(k in low for k in _GROQ_SKIP_KINDS):
+                continue
+            ids.append(mid)
+    except Exception as e:
+        print(f"    Groq: モデル一覧を取得できませんでした: {str(e)[:120]}")
+
+    def _rank(mid: str) -> int:
+        low = mid.lower()
+        for i, k in enumerate(_GROQ_PREFER):
+            if k in low:
+                return i
+        return len(_GROQ_PREFER)
+
+    ids.sort(key=_rank)
+    _groq_discovered[0] = ids
+    if ids:
+        print(f"    Groq: 利用可能なモデル {len(ids)} 件 → {', '.join(ids[:6])}")
+    return ids
 
 
-def _groq_candidates():
+def _groq_candidates(client=None):
     if _groq_model_ok[0] and _groq_model_ok[0] not in _groq_model_quota:
         return [_groq_model_ok[0]]
-    return [m for m in _GROQ_MODELS
+    pool = list(_GROQ_MODELS)
+    if client is not None:
+        for mid in _groq_discover(client):
+            if mid not in pool:
+                pool.append(mid)
+    return [m for m in pool
             if m not in _groq_model_dead and m not in _groq_model_quota]
 
 
@@ -609,7 +674,7 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
     for attempt in range(3):
         try:
             _groq_throttle()
-            cands = _groq_candidates()
+            cands = _groq_candidates(groq_client)
             if not cands:
                 print("    Groq: 使えるモデルがありません(全候補が利用不可)")
                 return None
@@ -628,7 +693,7 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                             {"role": "user", "content": prompt},
                         ],
                         temperature=0.1,
-                        max_tokens=2048,
+                        max_tokens=int(_os.environ.get("GROQ_MAX_TOKENS", "6000")),
                     )
                     if strict:
                         kwargs["response_format"] = {"type": "json_object"}
@@ -678,7 +743,7 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                     _groq_model_quota.add(tried_model[0])
                     if _groq_model_ok[0] == tried_model[0]:
                         _groq_model_ok[0] = None
-                nxt = _groq_candidates()
+                nxt = _groq_candidates(groq_client)
                 if nxt:
                     print(f"    Groq: {tried_model[0]} の枠切れ({'日次' if daily else '回復せず'})。{nxt[0]} に切り替えます")
                     if attempt < 2:
