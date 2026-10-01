@@ -104,12 +104,16 @@ def _groq_throttle():
     _groq_last_call[0] = time.time()
 
 # News/Schedule/Ticket 系のサブページを見つけるためのキーワード
-SUBPAGE_KEYWORDS = [
-    "news", "schedule", "live", "ticket", "event", "information", "info",
-    "tour", "oneman", "calendar", "concert", "gig",
-    "スケジュール", "ニュース", "ライブ", "チケット", "イベント", "公演", "お知らせ",
-    "ツアー", "ワンマン", "出演", "カレンダー", "日程",
+# サブページの選び方は関連度順にする。文書順に拾うとナビの並び次第で
+# スケジュールページが漏れ、ニュースやグッズで枠が埋まってしまう。
+# 上の段ほど「予定そのもの」が載っている可能性が高い。
+SUBPAGE_TIERS = [
+    ["schedule", "calendar", "スケジュール", "カレンダー", "日程",
+     "tour", "ツアー", "live", "ライブ", "公演", "oneman", "ワンマン", "concert", "gig"],
+    ["event", "イベント", "出演"],
+    ["ticket", "チケット", "news", "ニュース", "information", "info", "お知らせ"],
 ]
+SUBPAGE_KEYWORDS = [k for tier in SUBPAGE_TIERS for k in tier]
 
 
 def _get(url: str, timeout: int = 20) -> Optional[str]:
@@ -145,19 +149,21 @@ def _html_to_text(html: str) -> str:
 
 
 def _find_subpages(html: str, base_url: str) -> List[str]:
-    """News/Schedule 等の同一ドメイン内サブページURLを最大3件返す。"""
+    """同一ドメイン内のサブページURLを、予定が載っていそうな順に最大3件返す。"""
     soup = BeautifulSoup(html, "html.parser")
     base_host = urlparse(base_url).netloc
-    found: List[str] = []
+    ranked = {}
     for a in soup.find_all("a", href=True):
         blob = (a["href"] + " " + (a.get_text() or "")).lower()
-        if any(k in blob for k in SUBPAGE_KEYWORDS):
-            full = urljoin(base_url, a["href"])
-            if urlparse(full).netloc == base_host and full not in found and full != base_url:
-                found.append(full)
-        if len(found) >= 3:
-            break
-    return found
+        tier = next((i for i, ks in enumerate(SUBPAGE_TIERS) if any(k in blob for k in ks)), None)
+        if tier is None:
+            continue
+        full = urljoin(base_url, a["href"])
+        if urlparse(full).netloc != base_host or full == base_url:
+            continue
+        if full not in ranked or tier < ranked[full]:
+            ranked[full] = tier
+    return [u for u, _ in sorted(ranked.items(), key=lambda kv: kv[1])][:3]
 
 
 def _render_page(url: str) -> Optional[str]:
@@ -441,11 +447,13 @@ _EVENT_SIGNAL = re.compile(
 # 予定と無関係で、しかもイベント語を含むために凝縮をすり抜けてしまう行
 _CONDENSE_NOISE = re.compile(
     r"(WALLPAPER|壁紙|お絵かき|伝言板|セットリスト|SETLIST|メンバー紹介|プロフィール|"
-    r"ディスコグラ|DISCOGRAPHY|MAGAZINE|GOODS|グッズ|通販|抽選結果|会員|ファンクラブ)",
+    r"ディスコグラ|DISCOGRAPHY|MAGAZINE|GOODS|グッズ|通販|抽選結果|会員|ファンクラブ|"
+    # TV・ラジオ・雑誌等の露出はプロンプトでも抽出対象外。字数を食うだけなので先に落とす
+    r"^TV$|テレビ|ラジオ|RADIO|放送|番組|雑誌|配信中|公開中)",
     re.IGNORECASE)
 
 
-def _condense_for_llm(text: str, limit: int = 2000) -> str:
+def _condense_for_llm(text: str, limit: int = 1400) -> str:
     """LLM へ渡す前に、イベント関連の箇所だけを抜き出してトークン量を削る
     (無料枠の分/日あたり上限への対策)。
 
@@ -458,8 +466,14 @@ def _condense_for_llm(text: str, limit: int = 2000) -> str:
     lines = text.split("\n")
     blocks = []
     for i, ln in enumerate(lines):
-        if _EVENT_SIGNAL.search(ln) and not _CONDENSE_NOISE.search(ln):
-            blocks.append(range(max(0, i - 1), min(len(lines), i + 2)))
+        if not _EVENT_SIGNAL.search(ln):
+            continue
+        block = range(max(0, i - 1), min(len(lines), i + 2))
+        # 種になる行だけでなく、かたまり全体で判定する。日付行の隣に "TV" と
+        # 書いてあるだけの放送予定などは、文脈行として紛れ込んでくるため。
+        if any(_CONDENSE_NOISE.search(lines[j]) for j in block):
+            continue
+        blocks.append(block)
     if len(blocks) < 2:
         return text[:limit]
 
