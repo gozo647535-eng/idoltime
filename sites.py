@@ -61,7 +61,7 @@ import os as _os
 # 候補を順に試して通ったものを使い続ける。GROQ_MODEL でカンマ区切り指定すれば上書き可。
 _GROQ_MODELS = [
     m.strip() for m in _os.environ.get(
-        "GROQ_MODEL", "openai/gpt-oss-20b,openai/gpt-oss-120b,qwen/qwen3.6-27b"
+        "GROQ_MODEL", "openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.6-27b"
     ).split(",") if m.strip()
 ]
 # 実行中に確定した「使えるモデル」。None の間は _GROQ_MODELS を先頭から試す。
