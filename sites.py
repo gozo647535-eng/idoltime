@@ -75,6 +75,17 @@ _groq_model_dead = set()
 _groq_no_json_mode = set()
 
 
+def _pydantic_error():
+    """pydantic の検証エラー型(無ければ決して一致しないダミー)。"""
+    try:
+        from pydantic import ValidationError
+        return ValidationError
+    except Exception:
+        class _None(Exception):
+            pass
+        return _None
+
+
 def _lenient_json(raw: str):
     """コードフェンスや前後の説明が混じっていてもJSONオブジェクトを取り出す。"""
     import json as _json
@@ -502,7 +513,8 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
     return f"""以下は「{name}」の公式サイトから抜き出したイベント関連テキストです。本日は {today}(JST)です。
 このグループが**今後出演するライブ・イベント(公演)**を、正確なJSONで網羅的に抽出してください。チケット情報の有無に関わらず、開催日が特定できる出演予定はすべて拾ってください。
 
-出力は次の形の JSON オブジェクトのみ(前後に説明文やコードフェンスを付けない):
+出力は次の形の JSON オブジェクトのみ(前後に説明文やコードフェンスを付けない)。
+文字列の中では二重引用符(")を使わず、必要なら『』や「」に置き換えること(JSONが壊れるため):
 {{"events": [{{"event_name": str, "event_datetime": str, "open_time": str|null, "entry_time": str|null, "sale_datetime": str|null, "is_first_come": bool, "ticket_url": str|null, "venue": str|null, "ticket_types": [{{"name": str, "price": str}}]}}]}}
 
 厳守事項:
@@ -607,7 +619,16 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                 _groq_quota_exhausted[0] = True
                 print("    Groq枠が回復せず。以降のサイトはスキップ(次回実行で取得)")
                 return None
+            # 壊れたJSON(多くは本文の引用符がエスケープされていない)は毎回出るとは限らない。
+            # 生成し直せば通ることが多いので、同じ要求をもう一度投げる。
+            is_bad_json = isinstance(e, ValueError) and not isinstance(e, _pydantic_error())
+            if is_bad_json and attempt < 2:
+                print(f"    Groq: JSONが壊れていたため再生成します ({attempt + 1}/2): {msg[:120]}")
+                continue
             print(f"    Groq抽出失敗: {e}")
+            if is_bad_json:
+                # 「イベントが無い」ではなく解析に失敗しただけなので、確定させず次回に回す
+                return None
             return None if any(k in msg.lower() for k in ("deadline", "timeout", "timed out")) else []
     return None
 
