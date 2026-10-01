@@ -69,6 +69,8 @@ _GROQ_MODELS = [
 _groq_model_ok = [None]
 # 存在しない/権限が無いと分かったモデル(同じ失敗を繰り返さない)
 _groq_model_dead = set()
+# 枠(TPD/TPM)を使い切ったモデル。モデルごとに別枠なので、1つ落ちても次の候補で続行する。
+_groq_model_quota = set()
 
 
 # JSONモードを受け付けないモデルがある(gpt-oss-20b は response_format 指定だと
@@ -134,9 +136,26 @@ def _lenient_json(raw: str):
 
 
 def _groq_candidates():
-    if _groq_model_ok[0]:
+    if _groq_model_ok[0] and _groq_model_ok[0] not in _groq_model_quota:
         return [_groq_model_ok[0]]
-    return [m for m in _GROQ_MODELS if m not in _groq_model_dead]
+    return [m for m in _GROQ_MODELS
+            if m not in _groq_model_dead and m not in _groq_model_quota]
+
+
+def _groq_retry_wait(msg: str) -> float:
+    """429本文の "try again in 1m30s" / "...in 12.5s" から待ち時間(秒)を読む。"""
+    m = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", msg)
+    if not m:
+        return 65.0
+    mins = float(m.group(1) or 0)
+    return mins * 60 + float(m.group(2))
+
+
+def _groq_is_daily_quota(msg: str) -> bool:
+    """日次枠(TPD/RPD)切れか。待っても明けないのでモデルを切り替える。"""
+    low = msg.lower()
+    return ("per day" in low or "tpd" in low or "rpd" in low
+            or _groq_retry_wait(msg) > 300)
 
 
 _GROQ_MIN_INTERVAL = 16.0  # 秒 → 最大 ~3.7 req/分(8bのTPM 6,000内に収める)
@@ -586,6 +605,7 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
     if _groq_quota_exhausted[0]:
         return None
     prompt = _build_extract_prompt(name, text, _today_jst())
+    tried_model = [None]
     for attempt in range(3):
         try:
             _groq_throttle()
@@ -595,7 +615,9 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                 return None
             res = None
             last_err = None
+            tried_model[0] = cands[0]
             for model in cands:
+                tried_model[0] = model
                 # JSONモード → 失敗したら素の生成、の順で試す
                 modes = [False] if model in _groq_no_json_mode else [True, False]
                 for strict in modes:
@@ -642,17 +664,28 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
         except Exception as e:
             msg = str(e)
             is_quota = "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower()
-            if is_quota and attempt < 2:
-                # Groq のレート上限は分単位の窓なので、指示が読めない時は
-                # 窓が切り替わるまで待つ(20秒では明けず、無駄に打ち切っていた)。
-                m = re.search(r"try again in ([\d.]+)s", msg)
-                wait = min(float(m.group(1)) + 1, 65) if m else 65
-                print(f"    Groq 429(レート上限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2): {msg[:180]}")
-                time.sleep(wait)
-                continue
             if is_quota:
+                daily = _groq_is_daily_quota(msg)
+                if not daily and attempt < 2:
+                    # 分単位の窓は待てば明ける。指示された時間をきちんと待つ。
+                    wait = min(_groq_retry_wait(msg) + 1, 65)
+                    print(f"    Groq 429(レート上限)。{wait:.0f}s 待って再試行 ({attempt + 1}/2): {msg[:180]}")
+                    time.sleep(wait)
+                    continue
+                # 日次枠切れ(または待っても明けない) → このモデルは打ち止め。
+                # モデルごとに別枠なので、残っている候補に切り替えて続行する。
+                if tried_model[0]:
+                    _groq_model_quota.add(tried_model[0])
+                    if _groq_model_ok[0] == tried_model[0]:
+                        _groq_model_ok[0] = None
+                nxt = _groq_candidates()
+                if nxt:
+                    print(f"    Groq: {tried_model[0]} の枠切れ({'日次' if daily else '回復せず'})。{nxt[0]} に切り替えます")
+                    if attempt < 2:
+                        continue
+                    return None
                 _groq_quota_exhausted[0] = True
-                print("    Groq枠が回復せず。以降のサイトはスキップ(次回実行で取得)")
+                print("    Groq枠が回復せず(全モデル)。以降のサイトはスキップ(次回実行で取得)")
                 return None
             # 壊れたJSON(多くは本文の引用符がエスケープされていない)は毎回出るとは限らない。
             # 生成し直せば通ることが多いので、同じ要求をもう一度投げる。
