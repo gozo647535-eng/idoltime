@@ -28,7 +28,8 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v12: スケジュール用サブページもJS描画するようにし、カレンダーページを読めるようにする。
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
-PROMPT_VERSION = "v14"
+# v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
+PROMPT_VERSION = "v15"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
