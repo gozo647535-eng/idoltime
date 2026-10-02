@@ -830,6 +830,58 @@ YRT_QUERIES = [
 ]
 
 
+# 1回の発見実行で名前検索するグループ数。1クエリ3秒なので約2.3分。
+# 発見は1日5回なので、378グループを約1.7日で一周する。
+# GitHub Actions 無料枠(2,000分/月)の残りは実測で約350分/月なので、
+# 5回×2.3分×30日 ≒ 345分 で収まる。
+GROUP_QUERY_BATCH = int(os.environ.get("GROUP_QUERY_BATCH", "45"))
+
+
+def _group_search_queries(today: str) -> List[str]:
+    """このラウンドで名前検索するグループのクエリを返す。
+
+    優先順位は
+      ① 今後のイベントが1件も登録されていないグループ
+      ② 最後に検索した日が古いグループ(未検索を最優先)
+    とする。カバーできていないグループへ自動的に枠が寄り、
+    既に充実しているグループは後回しになる。
+    """
+    idols = build_idol_name_list()
+    if not idols:
+        return []
+    try:
+        covered = sb.get_covered_slugs(today)
+    except Exception as e:
+        print(f"  カバー状況の取得に失敗(全グループを同等に扱います): {e}")
+        covered = set()
+
+    try:
+        last_by_key = sb.get_last_seen_by_prefix("yq:")
+    except Exception as e:
+        print(f"  前回検索日の取得に失敗(未検索として扱います): {e}")
+        last_by_key = {}
+
+    ranked = []
+    for idol in idols:
+        q = yahoo_rt.search_query_for_name(idol["name"])
+        if not q:
+            continue
+        slug = idol["idol_slug"]
+        last = last_by_key.get(f"yq:{slug}") or ""
+        ranked.append((1 if slug in covered else 0, last, slug, q))
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    picked = ranked[:GROUP_QUERY_BATCH]
+    try:
+        sb.set_last_seen_many([(f"yq:{slug}", today) for _, _, slug, _q in picked])
+    except Exception as e:
+        print(f"  検索日の記録に失敗(次回も同じ順番になります): {e}")
+    if picked:
+        uncovered = sum(1 for p in picked if p[0] == 0)
+        print(f"グループ名検索: {len(picked)} 件 "
+              f"(出演情報が無いグループ {uncovered} 件を優先 / 候補 {len(ranked)} 件)")
+    return [q for _, _, _, q in picked]
+
+
 def _artists_match_idol(artists, idol_name: str) -> bool:
     """TicketDive の出演者一覧に idol_name が含まれるか(名前マッチのみ・LLM不使用)。"""
     key = ticketdive._norm_name(idol_name)
@@ -926,14 +978,17 @@ def run_yahoo_rt() -> int:
     if not idols:
         print("登録アイドルを取得できないため Yahoo リアルタイム取り込みをスキップ。")
         return 0
-    by_site = yahoo_rt.collect_event_urls(YRT_QUERIES)
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    queries = list(YRT_QUERIES) + _group_search_queries(today)
+    # クエリ数が増えるため、サイトごとの上限も引き上げる(当日取得済みURLは
+    # キャッシュで省かれるので、2回目以降の取得コストは増えない)。
+    by_site = yahoo_rt.collect_event_urls(queries, limit_per_site=150)
     total_urls = sum(len(v) for v in by_site.values())
     if not total_urls:
         print("Yahooリアルタイム: チケットサイトのリンクは見つかりませんでした。")
         return 0
     print("Yahooリアルタイム: " + " / ".join(f"{k} {len(v)}件" for k, v in by_site.items()))
 
-    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     total = 0
     touched = set()
     skipped = 0

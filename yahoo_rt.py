@@ -15,6 +15,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+import unicodedata
 from typing import Dict, List
 
 import ticketsite
@@ -39,6 +40,36 @@ SITE_PATTERNS = {
     "livepocket": ticketsite.LIVEPOCKET_RE,
     "tiget": ticketsite.TIGET_RE,
 }
+
+
+# 検索語に使えない装飾記号。Yahoo はこれを含むと0件になる
+# (「お願い‼︎フルハウス」の ‼︎ は U+203C + 異体字セレクタ U+FE0E で、実測0投稿。
+#  記号を落とすと3投稿返る)。
+_DECOR_RE = re.compile(
+    "[\uFE00-\uFE0F\u200B-\u200D\u2060]"            # 異体字セレクタ・ゼロ幅
+    "|[\u2000-\u206F\u2190-\u2BFF\u3001-\u303F]"    # 約物・矢印・記号
+    "|[\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]"  # 全角記号
+    "|[!-/:-@\\[-`{-~]"                                 # 半角記号
+)
+
+
+def search_query_for_name(name: str, suffix: str = "チケット") -> str:
+    """グループ名を検索語にする。装飾記号を落とし、キーワードを添える。
+
+    名前だけで引くと40投稿の枠がファンの雑談で埋まりチケットURLが出てこない
+    (実測: 名前のみ 0〜2件 / 「名前 チケット」 1〜9件)。
+    """
+    base = _DECOR_RE.sub(" ", unicodedata.normalize("NFKC", name or ""))
+    base = re.sub(r"\s+", " ", base).strip()
+    # 記号を落とすと「≠ME」→「ME」、「22/7」→「22 7」のように、検索語として
+    # 機能しない短い断片になる名前がある。無駄な1リクエストになるので捨てる。
+    core = base.replace(" ", "")
+    # 日本語は3文字でも十分に特定的(風男塾・江戸桜)。英数字だけの名前は
+    # 他の語に紛れるので4文字以上を求める。
+    min_len = 3 if any(not c.isascii() for c in core) else 4
+    if len(core) < min_len or core.isdigit():
+        return ""
+    return f"{base} {suffix}".strip()
 
 
 def _throttle():

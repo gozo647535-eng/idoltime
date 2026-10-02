@@ -60,6 +60,31 @@ def get_auto_event_ids(idol_slug: str, prefix: str = "tt:"):
     return [r["tweet_id"] for r in (rows or [])]
 
 
+def get_covered_slugs(today: str):
+    """今後(today以降)のイベントが1件以上ある idol_slug の集合を返す。
+
+    グループ別検索の順番決めに使う。1000行上限があるので offset を進めて読む。
+    """
+    covered = set()
+    for offset in range(0, 20000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": "idol_slug",
+                "hidden": "eq.false",
+                "event_datetime": f"gte.{today}",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        covered.update(r["idol_slug"] for r in rows if r.get("idol_slug"))
+        if len(rows) < 1000:
+            break
+    return covered
+
+
 def delete_auto_event(tweet_id: str):
     """tweet_id を指定して auto_events の1行を削除する。"""
     _request(
@@ -80,6 +105,47 @@ def get_last_seen(account: str):
     if rows:
         return rows[0].get("last_tweet_id")
     return None
+
+
+def get_last_seen_by_prefix(prefix: str):
+    """worker_state のうち account が prefix で始まる行を {account: 値} でまとめて返す。
+
+    グループ別検索の順番決めでは378グループ分の値が必要で、1件ずつ引くと
+    毎回378リクエストになる。1回で読む。
+    """
+    out = {}
+    for offset in range(0, 20000, 1000):
+        _, rows = _request(
+            "GET",
+            "worker_state",
+            params={
+                "select": "account,last_tweet_id",
+                "account": f"like.{prefix}*",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        for r in rows:
+            out[r["account"]] = r.get("last_tweet_id")
+        if len(rows) < 1000:
+            break
+    return out
+
+
+def set_last_seen_many(pairs):
+    """worker_state を一括 upsert。pairs は (account, 値) の並び。"""
+    body = [{"account": a, "last_tweet_id": str(v)} for a, v in pairs]
+    if not body:
+        return
+    for i in range(0, len(body), 500):
+        _request(
+            "POST",
+            "worker_state",
+            params={"on_conflict": "account"},
+            body=body[i:i + 500],
+            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
 
 
 def set_last_seen(account: str, last_tweet_id: str):
