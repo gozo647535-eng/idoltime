@@ -93,10 +93,12 @@ def _groq_note_too_large(model: str, msg: str) -> bool:
     何秒待っても必ず429になる。待つのではなく上限を下げて投げ直す。
     返り値: 上限を下げられた(=やり直す価値がある)か。
     """
-    if "too large" not in msg.lower():
+    low = msg.lower()
+    if "too large" not in low and "max_tokens" not in low:
         return False
     cur = _groq_cap_for(model)
-    m = re.search(r"[Ll]imit\s+(\d+)", msg)
+    m = (re.search(r"equal to\D{0,3}(\d+)", msg)
+         or re.search(r"[Ll]imit\s+(\d+)", msg))
     if m:
         cap = int(m.group(1))
         if cap >= cur:
@@ -198,8 +200,30 @@ _groq_discovered = [None]
 # 名前の除外では取りこぼすので、日本語の抽出に使える汎用チャットLLMの系統だけを許可する。
 _GROQ_ALLOW_FAMILIES = ("gpt-oss", "llama", "qwen", "kimi", "deepseek",
                         "mixtral", "mistral", "gemma")
+# 同じ系統名でも、分類器・検閲モデル・音声系は抽出に使えない
+# (llama-prompt-guard・gpt-oss-safeguard は context_window が 512)。
+_GROQ_DENY_KINDS = ("guard", "moderation", "whisper", "tts", "orpheus",
+                    "embed", "rerank", "vision", "ocr", "asr")
+# 抽出プロンプトを収めるのに必要な最低限の文脈長
+_GROQ_MIN_WINDOW = 16000
 _GROQ_PREFER = ("gpt-oss-120b", "gpt-oss-20b", "llama-4", "llama-3.3", "llama",
                 "qwen", "kimi", "deepseek", "mixtral", "mistral", "gemma")
+
+
+def _groq_model_window(m) -> int:
+    """モデルの文脈長を読む(分類器は 512 程度なので、これで実用品と区別できる)。"""
+    src = {}
+    try:
+        src = m.model_dump()
+    except Exception:
+        src = dict(getattr(m, "__dict__", {}) or {})
+    for k in ("context_window", "max_context_window_tokens", "context_length"):
+        v = getattr(m, k, None)
+        if not isinstance(v, int):
+            v = src.get(k)
+        if isinstance(v, int) and v > 0:
+            return v
+    return 0
 
 
 def _groq_discover(client) -> List[str]:
@@ -212,6 +236,11 @@ def _groq_discover(client) -> List[str]:
             mid = getattr(m, "id", "") or ""
             low = mid.lower()
             if not mid or not any(k in low for k in _GROQ_ALLOW_FAMILIES):
+                continue
+            if any(k in low for k in _GROQ_DENY_KINDS):
+                continue
+            win = _groq_model_window(m)
+            if win and win < _GROQ_MIN_WINDOW:
                 continue
             ids.append(mid)
     except Exception as e:
@@ -768,7 +797,7 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                         msg_m = str(me)
                         last_err = msg_m
                         if ("model_terms_required" in msg_m or "terms acceptance" in msg_m
-                                or "model_not_found" in msg_m or "does not exist" in msg_m):
+                                    or "model_not_found" in msg_m or "does not exist" in msg_m):
                             _groq_model_dead.add(model)
                             print(f"    Groq: モデル {model} は利用不可。次の候補を試します")
                             res = None
@@ -794,6 +823,10 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
         except Exception as e:
             msg = str(e)
             is_quota = "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower()
+            # 「max_tokens が大きすぎる」は待っても直らない。上限に合わせて投げ直す。
+            if (not is_quota and tried_model[0] and "max_tokens" in msg
+                    and _groq_note_too_large(tried_model[0], msg) and attempt < 2):
+                continue
             if is_quota:
                 # 枠切れではなく「1回の要求が上限より大きい」場合は待っても無駄。
                 if tried_model[0] and _groq_note_too_large(tried_model[0], msg):
