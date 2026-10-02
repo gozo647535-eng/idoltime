@@ -24,6 +24,11 @@ def is_ticketdive_url(url: Optional[str]) -> bool:
 
 
 def _get(url: str, timeout: int = 20) -> Optional[str]:
+    # 「…」を含むURLは、Xの表示用に末尾を省略されたもの(displayUrl)。
+    # 開いても404になるだけで、urllib は非ASCIIで例外も投げる。先に捨てる。
+    if not url or "\u2026" in url or any(ord(c) > 127 for c in url):
+        print(f"    TicketDive: 省略されたURLなのでスキップ {url[:52]}")
+        return None
     try:
         req = urllib.request.Request(
             url, headers={"User-Agent": UA, "Accept-Encoding": "gzip", "Accept-Language": "ja,en;q=0.8"}

@@ -65,6 +65,9 @@ jobs:
           # X取り込み: リポジトリ変数 ENABLE_X_INGEST=1 で日次有効化。x_only=true は動作確認用。
           ENABLE_X_INGEST: ${{ vars.ENABLE_X_INGEST }}
           X_ONLY: ${{ github.event.inputs.x_only }}
+          # ログを行ごとに流す。既定のブロックバッファだと出力が数分遅れて届き、
+          # どこで時間を使ったのかログから読めない(run #141 の切り分けで困った)。
+          PYTHONUNBUFFERED: "1"
           # 発見のみモード: 高頻度側の cron、または手動実行のチェックで有効になる
           DISCOVERY_ONLY: ${{ github.event.schedule == '37 3,11,19 * * *' || github.event.inputs.discovery_only == 'true' }}
           # cookies.json が無効化された場合のフォールバック(任意)

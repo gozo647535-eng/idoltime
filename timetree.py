@@ -222,6 +222,15 @@ def _gemini_note_ticket(gemini_client, title: str, note: str, today: str):
     クォータ切れ等で失敗しても (None, False) を返すだけで害はない。"""
     if not gemini_client:
         return None, False
+    # 本日の無料枠(2026-10 時点で 20リクエスト/日)を使い切っていたら呼ばない。
+    # ここに短絡が無かったため、枠切れ後もメモ1件ごとに429を取りに行き、
+    # 間隔制御の待ちだけで実行時間を食い潰していた(run #141 が55分で打ち切り)。
+    try:
+        import sites
+        if sites._quota_exhausted[0]:
+            return None, False
+    except Exception:
+        pass
     from google.genai import types
 
     prompt = (
@@ -248,6 +257,17 @@ def _gemini_note_ticket(gemini_client, title: str, note: str, today: str):
         nt = res.parsed
         return nt.sale_datetime, bool(nt.is_first_come)
     except Exception as e:
+        msg = str(e)
+        if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+            # 日次枠切れ。以降このプロセスでは Gemini を呼ばず正規表現の結果を使う。
+            try:
+                import sites
+                if not sites._quota_exhausted[0]:
+                    sites._quota_exhausted[0] = True
+                    print("    Gemini の日次枠切れ。以降メモの解析は正規表現のみで行います")
+            except Exception:
+                pass
+            return None, False
         print(f"    TimeTree メモGemini解析失敗(正規表現の結果を使用): {e}")
         return None, False
 
