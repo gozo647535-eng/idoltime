@@ -581,6 +581,46 @@ def merge_site_events(jsonld_events, gemini_events):
     return merged
 
 
+# 1回のフル実行で巡回する公式サイト数の上限。1サイトあたり約36秒(描画とサブページ
+# 取得を含む)なので、登録サイトが増えても実行時間が一定になるようにする。
+SITE_BATCH = int(os.environ.get("SITE_BATCH", "65"))
+
+
+def _order_sites(watch, today: str):
+    """巡回する順番を決め、上限 SITE_BATCH 件に絞る。
+
+    順番は ① 今後のイベントが少ないグループ ② 最後に巡回した日が古いグループ。
+    公式サイトの登録を増やしても実行時間が伸びないようにするためのローテーション。
+    内容ハッシュで抽出はスキップできるが、ハッシュを出すための取得自体は毎回
+    走るので、ここで絞らないと登録数に比例して時間が伸びる。
+    """
+    if len(watch) <= SITE_BATCH:
+        return watch
+    try:
+        counts = sb.get_upcoming_counts(today)
+    except Exception as e:
+        print(f"  カバー状況の取得に失敗(登録順に巡回します): {e}")
+        return watch[:SITE_BATCH]
+    try:
+        last_by_key = sb.get_last_seen_by_prefix("sq:")
+    except Exception:
+        last_by_key = {}
+    ranked = sorted(
+        watch,
+        key=lambda e: (counts.get(e["idol_slug"], 0),
+                       last_by_key.get(f"sq:{e['idol_slug']}") or ""),
+    )
+    picked = ranked[:SITE_BATCH]
+    try:
+        sb.set_last_seen_many([(f"sq:{e['idol_slug']}", today) for e in picked])
+    except Exception as e2:
+        print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e2}")
+    thin = sum(1 for e in picked if counts.get(e["idol_slug"], 0) < 3)
+    print(f"  今回巡回するのは {len(picked)} / {len(watch)} 件"
+          f"(今後3件未満のグループ {thin} 件を優先・残りは次回)")
+    return picked
+
+
 def run_sites() -> int:
     """公式サイトを巡回してイベント/チケット情報を取り込む(主軸)。
     JSON-LD(schema.org Event)を Gemini不要で抽出し、Gemini解析結果と統合する。"""
@@ -589,6 +629,7 @@ def run_sites() -> int:
         print("公式サイトの監視対象がありません(図鑑に公式サイトURLが未登録の可能性)。")
         return 0
     print(f"公式サイト監視対象: {len(watch)} 件")
+    watch = _order_sites(watch, datetime.datetime.now(JST).strftime("%Y-%m-%d"))
     total = 0
     for entry in watch:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
