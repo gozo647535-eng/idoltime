@@ -81,6 +81,10 @@ _groq_no_json_mode = set()
 _groq_max_tokens = {}
 
 
+# 出力がこれを下回るモデルは、1サイト分のイベントを書き切れない。足切りに使う。
+_GROQ_MIN_USABLE_CAP = 2000
+
+
 def _groq_cap_for(model: str) -> int:
     default = int(_os.environ.get("GROQ_MAX_TOKENS", "6000"))
     return min(_groq_max_tokens.get(model, default), default)
@@ -811,6 +815,15 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
         try:
             _groq_throttle()
             cands = _groq_candidates(groq_client)
+            # 出力上限が小さすぎるモデルは、正しいJSONのまま一部のイベントを
+            # 黙って落とす(途中切れの痕跡も残らない)。その結果でハッシュを確定
+            # させると、より充実していた既存の行を削除してしまうので使わない。
+            usable = [m for m in cands if _groq_cap_for(m) >= _GROQ_MIN_USABLE_CAP]
+            if cands and not usable:
+                print(f"    Groq: 残る候補の出力上限が小さすぎます({', '.join(f'{m}:{_groq_cap_for(m)}' for m in cands)})。"
+                      "欠けた結果を確定させないため次回に回します")
+                return None
+            cands = usable
             if not cands:
                 print("    Groq: 使えるモデルがありません(全候補が利用不可)")
                 return None
