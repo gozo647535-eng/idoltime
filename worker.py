@@ -497,6 +497,33 @@ _RECEPTION_ONLY = re.compile(r"(受付|先行発売|一般発売|プレイガイ
 _REAL_GATHERING = re.compile(r"(イベント|特典会|ライブ|LIVE|公演|フェス|生誕|ワンマン|ツアー|握手|お話し?会|撮影会)", re.IGNORECASE)
 
 
+def _sane_sale_datetime(sale: Optional[str], event_dt: Optional[str], name: str) -> Optional[str]:
+    """受付開始が公演日より後、というあり得ない値を落とす。
+
+    LLM は受付の年を書き落とすことがあり(「7/26 10:00」→ 翌年に補完される等)、
+    公演の数か月後に受付が始まる行ができていた。1年引いて辻褄が合うならそれを採り、
+    合わなければ受付情報を捨てる(公演自体は残す)。
+    """
+    if not sale or not event_dt:
+        return sale
+    try:
+        sd = datetime.datetime.fromisoformat(sale.replace("Z", "+00:00"))
+        ed = datetime.datetime.fromisoformat(event_dt[:10])
+    except ValueError:
+        return sale
+    if sd.date() <= ed.date():
+        return sale
+    # 年の取り違えは「受付が公演の半年以上あと」という形で現れる。少しだけ後ろに
+    # ずれている場合は年ではなく日付そのものが怪しいので、直さず受付情報を捨てる。
+    gap = (sd.date() - ed.date()).days
+    shifted = sd.replace(year=sd.year - 1)
+    if gap > 60 and shifted.date() <= ed.date():
+        print(f"    受付日が公演日より後だったため1年戻しました: {name[:30]} {sd.date()} → {shifted.date()}")
+        return shifted.isoformat()
+    print(f"    受付日({sd.date()})が公演日({ed.date()})より後のため受付情報を外します: {name[:30]}")
+    return None
+
+
 def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
     """公式サイト由来の SiteEvent を auto_events 行に変換。tweet_id は合成した安定IDで重複排除。"""
     if not ev.event_name:
@@ -507,6 +534,8 @@ def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
     sale = None
     if ev.sale_datetime:
         sale = to_timestamptz(normalize_datetime_string(ev.sale_datetime) or ev.sale_datetime)
+    event_dt = normalize_event_datetime(ev.event_datetime)
+    sale = _sane_sale_datetime(sale, event_dt, ev.event_name)
     key = hashlib.sha1(
         f"{slug}|{ev.event_name}|{ev.event_datetime}|{ev.sale_datetime}".encode("utf-8")
     ).hexdigest()[:20]
@@ -515,7 +544,7 @@ def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
         "idol_slug": slug,
         "account": None,
         "event_name": ev.event_name,
-        "event_datetime": normalize_event_datetime(ev.event_datetime),
+        "event_datetime": event_dt,
         "open_time": ev.open_time,
         "entry_time": ev.entry_time,
         "sale_datetime": sale,

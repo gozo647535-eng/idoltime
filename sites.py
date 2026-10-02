@@ -29,7 +29,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v15"
+PROMPT_VERSION = "v16"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -584,7 +584,18 @@ _CONDENSE_NOISE = re.compile(
     re.IGNORECASE)
 
 
-def _condense_for_llm(text: str, limit: int = 1400) -> str:
+# 受付・発売の告知行。プロンプト上これ自体はイベントにならないので、字数の割り当ては
+# 実公演より後回しにする(公演日が別の場所に書かれているサイトで、受付行だけが残って
+# 肝心の開催日が押し出される事故を防ぐ)。
+_REAL_DATE_LINE = re.compile(
+    r"(\d{4}\s*[./年]\s*\d{1,2}\s*[./月]\s*\d{1,2}|open\s*\d|start\s*\d|開場|開演)",
+    re.IGNORECASE)
+
+_RECEPTION_LINE = re.compile(
+    r"(先行受付|先行発売|一般発売|プレイガイド|抽選申込|二次先行|チケット発売|受付中|受付開始|発売中)")
+
+
+def _condense_for_llm(text: str, limit: int = 2200) -> str:
     """LLM へ渡す前に、イベント関連の箇所だけを抜き出してトークン量を削る
     (無料枠の分/日あたり上限への対策)。
 
@@ -619,10 +630,20 @@ def _condense_for_llm(text: str, limit: int = 1400) -> str:
         picked.update(new)
         used += size
 
-    for b in blocks:  # まず今後の日付を含むかたまり
-        if any(has_future_dates(lines[i]) for i in b):
+    def _is_reception(b) -> bool:
+        return (any(_RECEPTION_LINE.search(lines[i]) for i in b)
+                and not any(_REAL_DATE_LINE.search(lines[i]) for i in b))
+
+    future = [b for b in blocks if any(has_future_dates(lines[i]) for i in b)]
+    # ① 今後の日付を含み、受付告知ではないかたまり(=実際の公演)を最優先で入れる
+    for b in future:
+        if not _is_reception(b):
             take(b)
-    for b in blocks:  # 余力で残りのイベント行
+    # ② 次に受付告知(sale_datetime の材料になる)
+    for b in future:
+        take(b)
+    # ③ 余力で残りのイベント行
+    for b in blocks:
         take(b)
     return "\n".join(lines[i] for i in sorted(picked))
 
