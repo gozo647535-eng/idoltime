@@ -5,9 +5,11 @@ on:
     # 1日1回。UTC 9時 = Gemini無料枠の日次リセット(米国太平洋時間の深夜0時 ≒ UTC 7時)の直後に実行し、
     # 常にフレッシュな無料枠で回せるようにする(JST 18時)。
     - cron: '0 9 * * *'
-    # チケットサイト発見のみ。数分で終わるので、チケ発(発売開始)の告知を
-    # 早く拾うために高頻度で回す(フル巡回の 09:00 とは重ならない時刻)。
-    - cron: '37 1,5,13,17,21 * * *'
+    # チケットサイト発見のみ。グループ名検索(45グループ/回)を足した実測が
+    # 10.2分で、1日5回だと約2,400分/月になり無料枠(2,000分)を超えるため1日3回。
+    # 3×約9分 + フル約40分 = 約67分/日 ≒ 2,010分/月… に対し一括書き込みで
+    # 短縮した分の余裕を見て、8時間間隔(フル巡回の 09:00 とは重ならない時刻)。
+    - cron: '37 3,11,19 * * *'
   workflow_dispatch:
     inputs:
       x_only:
@@ -64,7 +66,7 @@ jobs:
           ENABLE_X_INGEST: ${{ vars.ENABLE_X_INGEST }}
           X_ONLY: ${{ github.event.inputs.x_only }}
           # 発見のみモード: 高頻度側の cron、または手動実行のチェックで有効になる
-          DISCOVERY_ONLY: ${{ github.event.schedule == '37 1,5,13,17,21 * * *' || github.event.inputs.discovery_only == 'true' }}
+          DISCOVERY_ONLY: ${{ github.event.schedule == '37 3,11,19 * * *' || github.event.inputs.discovery_only == 'true' }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}
           X_EMAIL: ${{ secrets.X_EMAIL }}

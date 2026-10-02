@@ -76,12 +76,16 @@ def get_auto_event_ids(idol_slug: str, prefix: str = "tt:"):
     return [r["tweet_id"] for r in (rows or [])]
 
 
-def get_covered_slugs(today: str):
-    """今後(today以降)のイベントが1件以上ある idol_slug の集合を返す。
+def get_upcoming_counts(today: str):
+    """今後(today以降)のイベント件数を idol_slug ごとに数えて返す。
 
-    グループ別検索の順番決めに使う。1000行上限があるので offset を進めて読む。
+    グループ別検索の順番決めに使う。0件か否かではなく件数で見るのは、
+    chuLa のように対バン経由で数件だけ拾えている(=0件ではないが実態より
+    大幅に少ない)グループを後回しにしないため。1000行上限があるので
+    offset を進めて読む。
     """
-    covered = set()
+    import collections
+    counts = collections.Counter()
     for offset in range(0, 20000, 1000):
         _, rows = _request(
             "GET",
@@ -95,10 +99,10 @@ def get_covered_slugs(today: str):
             },
         )
         rows = rows or []
-        covered.update(r["idol_slug"] for r in rows if r.get("idol_slug"))
+        counts.update(r["idol_slug"] for r in rows if r.get("idol_slug"))
         if len(rows) < 1000:
             break
-    return covered
+    return counts
 
 
 def delete_auto_event(tweet_id: str):

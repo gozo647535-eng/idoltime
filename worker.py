@@ -851,10 +851,19 @@ def _group_search_queries(today: str) -> List[str]:
     if not idols:
         return []
     try:
-        covered = sb.get_covered_slugs(today)
+        counts = sb.get_upcoming_counts(today)
     except Exception as e:
         print(f"  カバー状況の取得に失敗(全グループを同等に扱います): {e}")
-        covered = set()
+        counts = {}
+    # 公式サイト/TimeTree が登録されているグループは別経路でも取れる。
+    # 390組のうち290組はリンクが1つも無く(chuLa・AKB48 など)、この検索が
+    # 唯一の取得経路になるので、そちらを先に回す。
+    try:
+        other = {e["idol_slug"] for e in build_site_watch_list()}
+        other |= {e["idol_slug"] for e in build_timetree_watch_list()}
+    except Exception as e:
+        print(f"  他経路の判定に失敗(全グループを同等に扱います): {e}")
+        other = set()
 
     try:
         last_by_key = sb.get_last_seen_by_prefix("yq:")
@@ -869,18 +878,23 @@ def _group_search_queries(today: str) -> List[str]:
             continue
         slug = idol["idol_slug"]
         last = last_by_key.get(f"yq:{slug}") or ""
-        ranked.append((1 if slug in covered else 0, last, slug, q))
-    ranked.sort(key=lambda t: (t[0], t[1]))
+        # ① 他経路が無いグループ ② 今後のイベントが少ないグループ
+        # ③ 最後に検索した日が古いグループ の順。②を0件か否かの二択に
+        # すると、対バン経由で数件だけ拾えている実態より薄いグループ
+        # (chuLa は5件)が後回しになってしまう。
+        ranked.append((1 if slug in other else 0, counts.get(slug, 0), last, slug, q))
+    ranked.sort(key=lambda t: (t[0], t[1], t[2]))
     picked = ranked[:GROUP_QUERY_BATCH]
     try:
-        sb.set_last_seen_many([(f"yq:{slug}", today) for _, _, slug, _q in picked])
+        sb.set_last_seen_many([(f"yq:{slug}", today) for *_, slug, _q in picked])
     except Exception as e:
         print(f"  検索日の記録に失敗(次回も同じ順番になります): {e}")
     if picked:
-        uncovered = sum(1 for p in picked if p[0] == 0)
+        no_other = sum(1 for p in picked if p[0] == 0)
+        thin = sum(1 for p in picked if p[1] < 3)
         print(f"グループ名検索: {len(picked)} 件 "
-              f"(出演情報が無いグループ {uncovered} 件を優先 / 候補 {len(ranked)} 件)")
-    return [q for _, _, _, q in picked]
+              f"(他経路なし {no_other} 件 / 今後3件未満 {thin} 件 / 候補 {len(ranked)} 件)")
+    return [q for *_, _slug, q in picked]
 
 
 def _artists_match_idol(artists, idol_name: str) -> bool:
