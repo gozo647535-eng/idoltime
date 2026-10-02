@@ -703,23 +703,24 @@ def _fanout_lineup(row: dict, lineup_idx, today: str, touched: set) -> int:
     if not date or date < today or not row.get("tweet_id", "").startswith("tt:"):
         return 0
     text = f"{row.get('event_name') or ''}\n{row.get('raw_text') or ''}"
-    added = 0
+    batch = []
     for disp, other in lineup.names_in_text(text, lineup_idx):
         if other == row["idol_slug"]:
             continue
-        if added >= MAX_LINEUP_FANOUT:
+        if len(batch) >= MAX_LINEUP_FANOUT:
             print(f"    出演者の相互反映が{MAX_LINEUP_FANOUT}件を超えたため打ち切りました")
             break
         xr = dict(row)
         xr["idol_slug"] = other
         xr["tweet_id"] = f"ttx:{other}:{row['tweet_id'][3:]}:{date.replace('-', '')}"
-        try:
-            sb.upsert_auto_event(xr)
-            touched.add(other)
-            added += 1
-        except Exception as e:
-            print(f"    相互反映の書き込み失敗({disp}): {e}")
-    return added
+        batch.append(xr)
+        touched.add(other)
+    try:
+        sb.upsert_auto_events(batch)
+    except Exception as e:
+        print(f"    相互反映の書き込み失敗({len(batch)}件): {e}")
+        return 0
+    return len(batch)
 
 
 def run_timetree() -> int:
@@ -1010,19 +1011,22 @@ def run_yahoo_rt() -> int:
                 sb.set_last_seen(cache_key, today)
             except Exception:
                 pass
+            batch = []
             for idol in idols:
                 name, slug = idol["name"], idol["idol_slug"]
                 dates, multi_day = _match_dates(source, info, name, today)
                 for dt in dates:
                     if not dt or dt < today:
                         continue  # 終了済みの公演は取り込まない
-                    try:
-                        sb.upsert_auto_event(_build_yrt_row(slug, source, url, info, dt, multi_day))
-                        touched.add(slug)
-                        total += 1
-                        print(f"  → [{source}] {name}: {info.get('event_name')} ({dt})")
-                    except Exception as e:
-                        print(f"  書き込み失敗: {e}")
+                    batch.append(_build_yrt_row(slug, source, url, info, dt, multi_day))
+                    touched.add(slug)
+                    print(f"  → [{source}] {name}: {info.get('event_name')} ({dt})")
+            # フェス1本で100組を超えることがあるので、1行ずつではなくまとめて書く
+            try:
+                sb.upsert_auto_events(batch)
+                total += len(batch)
+            except Exception as e:
+                print(f"  書き込み失敗({len(batch)}件): {e}")
 
     # 発見は機会依存(今日の検索に出ない=中止ではない)ので再突合削除はせず、
     # 開催日が過ぎた行だけを掃除する。

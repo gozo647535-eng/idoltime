@@ -50,6 +50,22 @@ def upsert_auto_event(row: dict):
     )
 
 
+def upsert_auto_events(rows):
+    """auto_events を一括 upsert。1行ずつ POST すると件数分のHTTP往復になる
+    (フェス1本で150グループ分の行が立つため、ここが実行時間を食っていた)。"""
+    rows = [r for r in rows if r]
+    if not rows:
+        return
+    for i in range(0, len(rows), 200):
+        _request(
+            "POST",
+            "auto_events",
+            params={"on_conflict": "tweet_id"},
+            body=rows[i:i + 200],
+            headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
+
+
 def get_auto_event_ids(idol_slug: str, prefix: str = "tt:"):
     """指定アイドルの、prefix で始まる tweet_id 一覧を返す(再突合による削除用)。"""
     _, rows = _request(
