@@ -77,6 +77,39 @@ _groq_model_quota = set()
 # "Failed to validate JSON" で400になる)。その場合は素の生成に切り替えるため記録する。
 _groq_no_json_mode = set()
 
+# 出力TPMが小さいモデル向けに、モデルごとの max_tokens 上限を覚える。
+_groq_max_tokens = {}
+
+
+def _groq_cap_for(model: str) -> int:
+    default = int(_os.environ.get("GROQ_MAX_TOKENS", "6000"))
+    return min(_groq_max_tokens.get(model, default), default)
+
+
+def _groq_note_too_large(model: str, msg: str) -> bool:
+    """「要求が大きすぎる」系の429を見て、そのモデルの上限を下げる。
+
+    qwen のように出力TPMが小さいモデルでは max_tokens 自体が上限を超え、
+    何秒待っても必ず429になる。待つのではなく上限を下げて投げ直す。
+    返り値: 上限を下げられた(=やり直す価値がある)か。
+    """
+    if "too large" not in msg.lower():
+        return False
+    cur = _groq_cap_for(model)
+    m = re.search(r"[Ll]imit\s+(\d+)", msg)
+    if m:
+        cap = int(m.group(1))
+        if cap >= cur:
+            return False  # 既に上限以下。別の原因なので下げ続けない
+    else:
+        cap = cur // 2
+    cap = max(600, cap)
+    if cap >= cur:
+        return False
+    _groq_max_tokens[model] = cap
+    print(f"    Groq: {model} の出力上限に合わせて max_tokens を {cur} → {cap} に下げます")
+    return True
+
 
 def _pydantic_error():
     """pydantic の検証エラー型(無ければ決して一致しないダミー)。"""
@@ -366,7 +399,14 @@ def _render_site(site_url: str) -> List[str]:
 
 class TicketType(BaseModel):
     name: str = Field(description="券種名 (例: 一般, VIP)")
-    price: str = Field(description="料金 (例: 5000円)")
+    price: str = Field("", description="料金 (例: 5000円)")
+
+    # 料金未定の券種に null を返すモデルがある。1項目の null で抽出全体を
+    # 落とすのは割に合わないので、空文字に丸める。
+    @field_validator("name", "price", mode="before")
+    @classmethod
+    def _coerce_str(cls, v):
+        return "" if v is None else v
 
 
 class SiteEvent(BaseModel):
@@ -717,7 +757,7 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                             {"role": "user", "content": prompt},
                         ],
                         temperature=0.1,
-                        max_tokens=int(_os.environ.get("GROQ_MAX_TOKENS", "6000")),
+                        max_tokens=_groq_cap_for(model),
                     )
                     if strict:
                         kwargs["response_format"] = {"type": "json_object"}
@@ -755,6 +795,9 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
             msg = str(e)
             is_quota = "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower()
             if is_quota:
+                # 枠切れではなく「1回の要求が上限より大きい」場合は待っても無駄。
+                if tried_model[0] and _groq_note_too_large(tried_model[0], msg):
+                    continue
                 daily = _groq_is_daily_quota(msg)
                 if not daily and attempt < 2:
                     # 分単位の窓は待てば明ける。指示された時間をきちんと待つ。
