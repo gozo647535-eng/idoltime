@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 import sb  # Supabase 入出力(標準ライブラリのみ)
 import sites  # 公式サイトからの取得エンジン(主軸)
+import gcal  # Google 公開カレンダー(ICS)からの取得エンジン
 import lineup  # 出演欄から図鑑の登録グループを突合
 import timetree  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
@@ -32,6 +33,7 @@ import ticketsite  # LivePocket / TiGET イベントページの構造化パー�
 import yahoo_rt  # Yahoo!リアルタイム検索からのチケットサイト・イベント発見
 from watchlist import (
     build_idol_name_list,
+    build_gcal_watch_list,
     build_site_watch_list,
     build_timetree_watch_list,
     build_watch_list,
@@ -559,6 +561,99 @@ def build_site_row(slug: str, name: str, site_url: str, ev) -> Optional[dict]:
     }
 
 
+def build_gcal_row(slug: str, name: str, gc_url: str, ev: dict) -> Optional[dict]:
+    """Google カレンダーの整形済みイベントを auto_events 行に変換。"""
+    if not ev.get("title"):
+        return None
+    open_t, entry_t = timetree.extract_open_entry(ev.get("note") or "")
+    return {
+        "tweet_id": f"gc:{slug}:{ev['id']}",
+        "idol_slug": slug,
+        "account": None,
+        "event_name": ev["title"],
+        "event_datetime": normalize_event_datetime(ev.get("event_datetime")),
+        "open_time": open_t,
+        "entry_time": entry_t,
+        "sale_datetime": to_timestamptz(ev.get("sale_datetime")),
+        "is_first_come": bool(ev.get("is_first_come")),
+        "ticket_url": ev.get("ticket_url"),
+        "ticket_types": [],
+        "max_tickets": None,
+        "other_details": clean_venue(ev.get("venue")),
+        "raw_text": ev.get("note") or None,
+        "tweet_url": ev.get("page_url") or gc_url,
+    }
+
+
+def run_gcal() -> int:
+    """Google 公開カレンダー(ICS)を巡回してイベントを取り込む。
+
+    公式サイトにカレンダーを埋め込んでいるグループが一定数あり、公開設定なら
+    ICS が誰でも取得できる。構造化データなので LLM は使わない。
+    """
+    watch = build_gcal_watch_list()
+    if not watch:
+        print("Googleカレンダーの監視対象がありません。")
+        return 0
+    print(f"Googleカレンダー監視対象: {len(watch)} 件")
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    lineup_idx = lineup.build_index(build_idol_name_list())
+    total = 0
+    fanout = 0
+    fanout_slugs = set()
+    for entry in watch:
+        slug, name, gc_url = entry["idol_slug"], entry["name"], entry["gc_url"]
+        cal_id = gcal.extract_calendar_id(gc_url)
+        if not cal_id:
+            print(f"{name}: カレンダーIDを取れません({gc_url[:60]})")
+            continue
+        print(f"{name} のGoogleカレンダーを確認: {cal_id[:48]}")
+        try:
+            content_hash, events = gcal.fetch_public_events(cal_id)
+        except Exception as e:
+            print(f"  失敗: {e}")
+            continue
+        if content_hash is None:
+            continue
+        state_key = f"gc:{cal_id}"
+        if sb.get_last_seen(state_key) == content_hash:
+            print("  変更なし。スキップ")
+            continue
+        rows, emitted = [], set()
+        for ev in events:
+            sale_dt, first_come = timetree.extract_note_ticket(
+                gemini_client, ev["title"], ev.get("note") or "", today)
+            if sale_dt:
+                ev["sale_datetime"] = normalize_datetime_string(sale_dt) or sale_dt
+            ev["is_first_come"] = first_come
+            row = build_gcal_row(slug, name, gc_url, ev)
+            if row:
+                rows.append(row)
+                emitted.add(row["tweet_id"])
+        try:
+            sb.upsert_auto_events(rows)
+        except Exception as e:
+            print(f"  書き込み失敗({len(rows)}件): {e}")
+            continue
+        for r in rows:
+            fanout += _fanout_lineup(r, lineup_idx, today, fanout_slugs)
+        removed = 0
+        try:
+            for old_id in sb.get_auto_event_ids(slug, prefix=f"gc:{slug}:"):
+                if old_id not in emitted:
+                    sb.delete_auto_event(old_id)
+                    removed += 1
+        except Exception as e:
+            print(f"  再突合(削除)でエラー: {e}")
+        sb.set_last_seen(state_key, content_hash)
+        print(f"  {len(rows)} 件反映 / {removed} 件削除")
+        total += len(rows)
+    x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
+    print(f"Googleカレンダー取り込み完了: 合計 {total} 件 / "
+          f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
+    return total
+
+
 def _site_event_dedup_key(name, datetime_str):
     """同一公演の重複判定キー(正規化した名前 + 日付部分)。"""
     n = re.sub(r"\s+", "", (name or "").lower())
@@ -741,7 +836,11 @@ def _fanout_lineup(row: dict, lineup_idx, today: str, touched: set) -> int:
     カレンダーの再突合削除(出力されなかった tt: 行を消す)に巻き込まれない。
     """
     date = (row.get("event_datetime") or "")[:10]
-    if not date or date < today or not row.get("tweet_id", "").startswith("tt:"):
+    tid = row.get("tweet_id", "")
+    # tt(TimeTree) と gc(Googleカレンダー)の行を相互反映の対象にする。
+    # ttx 自体をさらに展開しないよう、接頭辞を限定する。
+    prefix = next((p for p in ("tt:", "gc:") if tid.startswith(p)), None)
+    if not date or date < today or not prefix:
         return 0
     text = f"{row.get('event_name') or ''}\n{row.get('raw_text') or ''}"
     batch = []
@@ -753,7 +852,7 @@ def _fanout_lineup(row: dict, lineup_idx, today: str, touched: set) -> int:
             break
         xr = dict(row)
         xr["idol_slug"] = other
-        xr["tweet_id"] = f"ttx:{other}:{row['tweet_id'][3:]}:{date.replace('-', '')}"
+        xr["tweet_id"] = f"ttx:{other}:{tid[len(prefix):]}:{date.replace('-', '')}"
         batch.append(xr)
         touched.add(other)
     try:
@@ -1103,6 +1202,7 @@ def main() -> int:
     if not x_only:
         run_sites()
         run_timetree()
+        run_gcal()
         run_yahoo_rt()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())

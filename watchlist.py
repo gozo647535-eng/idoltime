@@ -91,6 +91,10 @@ def build_watch_list():
 
 # SNSではない=公式サイトとみなすドメイン断片(除外リスト)
 _SOCIAL_HOSTS = ("x.com", "twitter.com", "instagram.com", "tiktok.com", "youtube.com", "youtu.be", "line.me")
+# カレンダーのURLは公式サイトではない。これを除かないと、TimeTree しか登録が無い
+# グループで TimeTree のページを「公式サイト」として巡回してしまい、
+# LLM の枠を無駄に使う(実測15組が該当していた)。
+_CALENDAR_HOSTS = ("timetr.ee", "timetreeapp.com", "calendar.google.com")
 
 
 def pick_official_site(links) -> Optional[str]:
@@ -102,7 +106,9 @@ def pick_official_site(links) -> Optional[str]:
                 return url
     for link in links or []:
         url = link.get("url") or ""
-        if url.startswith("http") and not any(h in url for h in _SOCIAL_HOSTS):
+        if (url.startswith("http")
+                and not any(h in url for h in _SOCIAL_HOSTS)
+                and not any(h in url for h in _CALENDAR_HOSTS)):
             return url
     return None
 
@@ -124,6 +130,59 @@ def pick_timetree_url(links) -> Optional[str]:
         if any(h in url for h in _TIMETREE_HOSTS):
             return url
     return None
+
+
+# Google カレンダーとみなすホスト/ラベル
+_GCAL_HOSTS = ("calendar.google.com",)
+_GCAL_LABELS = ("googleカレンダー", "google カレンダー", "google calendar", "gカレンダー")
+
+
+def pick_gcal_url(links) -> Optional[str]:
+    """links から Google 公開カレンダーのURLを選ぶ。
+
+    「予定を追加」用の render?action=TEMPLATE はカレンダーではないので採らない。
+    """
+    for link in links or []:
+        label = (link.get("label") or "").lower()
+        url = link.get("url") or ""
+        if not url.startswith("http"):
+            continue
+        if not (any(h in url for h in _GCAL_HOSTS) or any(l in label for l in _GCAL_LABELS)):
+            continue
+        if "action=TEMPLATE" in url.replace("&amp;", "&"):
+            continue
+        return url
+    return None
+
+
+def build_gcal_watch_list():
+    """図鑑カタログ + 有志追記から、Google カレンダー監視対象
+    [{idol_slug, name, gc_url}] を作る。"""
+    seen = set()
+    watch = []
+
+    def add(slug, name, links):
+        if not slug or slug in seen:
+            return
+        url = pick_gcal_url(links)
+        if url:
+            watch.append({"idol_slug": slug, "name": name or slug, "gc_url": url})
+            seen.add(slug)
+
+    try:
+        catalog = sb.fetch_url_json(CATALOG_URL)
+        for idol in catalog.get("idols", []):
+            add(idol.get("slug"), idol.get("name"), idol.get("links", []))
+    except Exception as e:
+        print(f"catalog.json の取得に失敗(Googleカレンダー・スキップ): {e}")
+
+    try:
+        for payload in sb.get_approved_idol_info():
+            add(payload.get("idolSlug"), payload.get("idolName"), payload.get("links", []))
+    except Exception as e:
+        print(f"idol_info の取得に失敗(Googleカレンダー・スキップ): {e}")
+
+    return watch
 
 
 def build_timetree_watch_list():
