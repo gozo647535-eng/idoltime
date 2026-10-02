@@ -161,9 +161,12 @@ def _lenient_json(raw: str):
 # API から取得した実在モデル一覧(候補を推測で書くと存在しないモデルで詰む)
 _groq_discovered = [None]
 
-_GROQ_SKIP_KINDS = ("whisper", "tts", "guard", "embed", "safety", "moderation", "vision")
+# 一覧には音声合成(canopylabs/orpheus-*)やアラビア語専用(allam-*)も混ざる。
+# 名前の除外では取りこぼすので、日本語の抽出に使える汎用チャットLLMの系統だけを許可する。
+_GROQ_ALLOW_FAMILIES = ("gpt-oss", "llama", "qwen", "kimi", "deepseek",
+                        "mixtral", "mistral", "gemma")
 _GROQ_PREFER = ("gpt-oss-120b", "gpt-oss-20b", "llama-4", "llama-3.3", "llama",
-                "qwen", "kimi", "deepseek", "mixtral", "gemma")
+                "qwen", "kimi", "deepseek", "mixtral", "mistral", "gemma")
 
 
 def _groq_discover(client) -> List[str]:
@@ -175,7 +178,7 @@ def _groq_discover(client) -> List[str]:
         for m in client.models.list().data:
             mid = getattr(m, "id", "") or ""
             low = mid.lower()
-            if not mid or any(k in low for k in _GROQ_SKIP_KINDS):
+            if not mid or not any(k in low for k in _GROQ_ALLOW_FAMILIES):
                 continue
             ids.append(mid)
     except Exception as e:
@@ -724,7 +727,8 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                     except Exception as me:
                         msg_m = str(me)
                         last_err = msg_m
-                        if "model_not_found" in msg_m or "does not exist" in msg_m:
+                        if ("model_terms_required" in msg_m or "terms acceptance" in msg_m
+                                or "model_not_found" in msg_m or "does not exist" in msg_m):
                             _groq_model_dead.add(model)
                             print(f"    Groq: モデル {model} は利用不可。次の候補を試します")
                             res = None
@@ -780,10 +784,10 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
                 print(f"    Groq: JSONが壊れていたため再生成します ({attempt + 1}/2): {msg[:120]}")
                 continue
             print(f"    Groq抽出失敗: {e}")
-            if is_bad_json:
-                # 「イベントが無い」ではなく解析に失敗しただけなので、確定させず次回に回す
-                return None
-            return None if any(k in msg.lower() for k in ("deadline", "timeout", "timed out")) else []
+            # 失敗は「イベントが無い」ではない。[] を返すとハッシュが確定し、
+            # それまでに取れていた行まで削除されてしまう(v16 初回実行で実際に起きた)。
+            # 0件と確定できるのは、応答を正しく解析できて events が空だったときだけ。
+            return None
     return None
 
 
@@ -842,7 +846,7 @@ def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEve
                 print("    Gemini枠が回復せず。以降のサイトはスキップ(次回実行で取得)")
                 return None
             print(f"    Gemini抽出失敗: {e}")
-            return None if "deadline" in msg.lower() else []
+            return None  # 失敗を0件として確定させない(既存の行が消える)
     return None
 
 
