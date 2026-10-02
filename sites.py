@@ -29,7 +29,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v16"
+PROMPT_VERSION = "v17"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -305,10 +305,17 @@ def _groq_throttle():
 # 上の段ほど「予定そのもの」が載っている可能性が高い。
 SUBPAGE_TIERS = [
     ["schedule", "calendar", "スケジュール", "カレンダー", "日程",
-     "tour", "ツアー", "live", "ライブ", "公演", "oneman", "ワンマン", "concert", "gig"],
+     "tour", "ツアー", "live", "ライブ", "公演", "oneman", "ワンマン", "concert", "gig",
+     # 単独公演の特設ページ。ここだけに公演日が書かれていることがある
+     # (いぎなり東北産のアリーナライブは /pages/iginari-arena にしか日付が無い)
+     "arena", "アリーナ", "特設", "hall", "ホール", "anniversary", "周年", "生誕"],
     ["event", "イベント", "出演"],
     ["ticket", "チケット", "news", "ニュース", "information", "info", "お知らせ"],
 ]
+# /contents/1113873 のような記事の個別URL。トップの新着欄で入れ替わるため、
+# 同じ階層の固定ページより後ろに回す(入れ替わるたびに特設ページが押し出されていた)。
+_NEWS_PERMALINK = re.compile(r"/\d{5,}/?$")
+MAX_SUBPAGES = 5
 SUBPAGE_KEYWORDS = [k for tier in SUBPAGE_TIERS for k in tier]
 
 
@@ -344,8 +351,32 @@ def _html_to_text(html: str) -> str:
     return re.sub(r"\n\s*\n+", "\n", text).strip()
 
 
+PAGE_MARK = "【ページ】"
+
+
+def _page_title(html: str) -> str:
+    """ページの見出し(h1 → og:title → title)。公演名として使えることがある。"""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return ""
+    h1 = soup.find("h1")
+    if h1 and (h1.get_text() or "").strip():
+        return re.sub(r"\s+", " ", h1.get_text()).strip()[:120]
+    og = soup.find("meta", attrs={"property": "og:title"})
+    if og and (og.get("content") or "").strip():
+        return re.sub(r"\s+", " ", og["content"]).strip()[:120]
+    if soup.title and (soup.title.get_text() or "").strip():
+        return re.sub(r"\s+", " ", soup.title.get_text()).strip()[:120]
+    return ""
+
+
 def _find_subpages(html: str, base_url: str) -> List[str]:
-    """同一ドメイン内のサブページURLを、予定が載っていそうな順に最大3件返す。"""
+    """同一ドメイン内のサブページURLを、予定が載っていそうな順に返す。
+
+    順位は (tier, 記事の個別URLか) で決める。tier だけで並べると、同じ tier の中では
+    出現順になり、トップの新着欄で入れ替わる記事URLが固定ページを押し出してしまう。
+    """
     soup = BeautifulSoup(html, "html.parser")
     base_host = urlparse(base_url).netloc
     ranked = {}
@@ -355,11 +386,19 @@ def _find_subpages(html: str, base_url: str) -> List[str]:
         if tier is None:
             continue
         full = urljoin(base_url, a["href"])
-        if urlparse(full).netloc != base_host or full == base_url:
+        # 同じページの別アンカー(#ticket 等)は同一ページなので断片を落として揃える
+        full = full.split("#", 1)[0]
+        # 末尾のスラッシュ有無で同じページを2回取らないよう揃える
+        if full.endswith("/") and urlparse(full).path != "/":
+            full = full.rstrip("/")
+        if urlparse(full).netloc != base_host or full.rstrip("/") == base_url.rstrip("/"):
             continue
         if full not in ranked or tier < ranked[full]:
             ranked[full] = tier
-    return [u for u, _ in sorted(ranked.items(), key=lambda kv: kv[1])][:3]
+    order = {u: i for i, u in enumerate(ranked)}
+    return sorted(
+        ranked, key=lambda u: (ranked[u], bool(_NEWS_PERMALINK.search(urlparse(u).path)), order[u])
+    )[:MAX_SUBPAGES]
 
 
 def _render_page(url: str) -> Optional[str]:
@@ -678,9 +717,10 @@ def _condense_for_llm(text: str, limit: int = 2200) -> str:
     扱い、組にしたまま残す(日付だけが並んで名前が消えるのを防ぐ)。
     """
     lines = text.split("\n")
+    page_marks = [i for i, ln in enumerate(lines) if ln.startswith(PAGE_MARK)]
     blocks = []
     for i, ln in enumerate(lines):
-        if not _EVENT_SIGNAL.search(ln):
+        if not _EVENT_SIGNAL.search(ln) or ln.startswith(PAGE_MARK):
             continue
         block = range(max(0, i - 1), min(len(lines), i + 2))
         # 種になる行だけでなく、かたまり全体で判定する。日付行の隣に "TV" と
@@ -691,7 +731,7 @@ def _condense_for_llm(text: str, limit: int = 2200) -> str:
     if len(blocks) < 2:
         return text[:limit]
 
-    picked, used = set(), 0
+    picked, used = set(page_marks), 0  # ページ見出しは必ず残す(数行で安い)
 
     def take(block):
         nonlocal used
@@ -741,6 +781,9 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
 - チケットが分かる場合のみ: sale_datetime(発売/受付/先行/抽選申込の開始日時)は 'YYYY-MM-DD HH:MM:SS' 形式、is_first_come、ticket_types、ticket_url を埋める。無ければ null/空でよい
 - open_time(開場)・entry_time(入場)は本文に明記がある場合のみ 'HH:MM'(無ければ null)
 - venue(会場)は分かれば入れる。同じ公演を重複させない
+- 行頭が「【ページ】」の行は、以降の記述がどのページから来たかを示す見出しである。
+  日付や open/start だけが並んでいて公演名が見当たらない場合は、直前の「【ページ】」の
+  見出しを公演名として使ってよい(特設ページは公演名が見出しにしか無いことがある)
 - 該当が無ければ events は空配列にする
 
 【イベント関連テキスト】
@@ -977,7 +1020,16 @@ def fetch_site_content(site_url: str):
             if h:
                 htmls.append(h)
 
-    texts = [t for t in (_html_to_text(h) for h in htmls) if t]
+    texts = []
+    for h in htmls:
+        t = _html_to_text(h)
+        if not t:
+            continue
+        # 特設ページは「DATE／TIME / 2026年12月19日(土)」のように日付だけが並び、
+        # 公演名はページ見出しにしか無いことがある。どのページの記述かを示す行を
+        # 付けておくと、名前の無い日付のかたまりにも公演名を与えられる。
+        title = _page_title(h)
+        texts.append(f"{PAGE_MARK}{title}\n{t}" if title else t)
 
     # JSON-LD(schema.org Event)を抽出。名前+日時で重複除去。
     jsonld_events: List[SiteEvent] = []
