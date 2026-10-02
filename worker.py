@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 import sb  # Supabase 入出力(標準ライブラリのみ)
 import sites  # 公式サイトからの取得エンジン(主軸)
+import lineup  # 出演欄から図鑑の登録グループを突合
 import timetree  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
 import ticketsite  # LivePocket / TiGET イベントページの構造化パーサ
@@ -684,6 +685,43 @@ def build_timetree_row(slug: str, name: str, tt_url: str, ev: dict) -> Optional[
     }
 
 
+# 1イベントあたりの相互反映の上限。大型フェスでも出演組数はこの範囲に収まる。
+MAX_LINEUP_FANOUT = 60
+
+
+def _fanout_lineup(row: dict, lineup_idx, today: str, touched: set) -> int:
+    """対バン/フェスの行を、本文に名前がある他の登録グループにも反映する。
+
+    対バンはどこか1組のカレンダーにしか載らないことが多く、そのままでは
+    同じイベントに出る他のグループのページに何も出ない(ホームの「今日の現場」
+    には出るのに、出演者のページには出ないという食い違いになっていた)。
+
+    ID は ttx: で始める。tt: とは別系統にしておくことで、各グループ自身の
+    カレンダーの再突合削除(出力されなかった tt: 行を消す)に巻き込まれない。
+    """
+    date = (row.get("event_datetime") or "")[:10]
+    if not date or date < today or not row.get("tweet_id", "").startswith("tt:"):
+        return 0
+    text = f"{row.get('event_name') or ''}\n{row.get('raw_text') or ''}"
+    added = 0
+    for disp, other in lineup.names_in_text(text, lineup_idx):
+        if other == row["idol_slug"]:
+            continue
+        if added >= MAX_LINEUP_FANOUT:
+            print(f"    出演者の相互反映が{MAX_LINEUP_FANOUT}件を超えたため打ち切りました")
+            break
+        xr = dict(row)
+        xr["idol_slug"] = other
+        xr["tweet_id"] = f"ttx:{other}:{row['tweet_id'][3:]}:{date.replace('-', '')}"
+        try:
+            sb.upsert_auto_event(xr)
+            touched.add(other)
+            added += 1
+        except Exception as e:
+            print(f"    相互反映の書き込み失敗({disp}): {e}")
+    return added
+
+
 def run_timetree() -> int:
     """TimeTree 公開カレンダーを巡回してイベント/チケット情報を取り込む。"""
     watch = build_timetree_watch_list()
@@ -692,7 +730,11 @@ def run_timetree() -> int:
         return 0
     print(f"TimeTree 監視対象: {len(watch)} 件")
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    lineup_idx = lineup.build_index(build_idol_name_list())
+    print(f"出演者の相互反映に使う登録グループ: {len(lineup_idx)} 件")
     total = 0
+    fanout = 0
+    fanout_slugs = set()
     for entry in watch:
         slug, name, tt_url = entry["idol_slug"], entry["name"], entry["tt_url"]
         alias = timetree.extract_alias(tt_url)
@@ -732,6 +774,8 @@ def run_timetree() -> int:
                         count += 1
                     except Exception as e:
                         print(f"  書き込み失敗: {e}")
+                        continue
+                    fanout += _fanout_lineup(r, lineup_idx, today, fanout_slugs)
         # 再突合: 今回出力しなかった過去のtt行(過去イベント・削除済み・プレースホルダ等)を掃除
         try:
             for old_id in sb.get_auto_event_ids(slug, prefix=f"tt:{slug}:"):
@@ -743,7 +787,9 @@ def run_timetree() -> int:
         sb.set_last_seen(state_key, content_hash)
         print(f"  {count} 件反映 / {removed} 件削除")
         total += count
-    print(f"TimeTree 取り込み完了: 合計 {total} 件")
+    x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
+    print(f"TimeTree 取り込み完了: 合計 {total} 件 / "
+          f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
     return total
 
 
@@ -798,19 +844,27 @@ def _artists_match_idol(artists, idol_name: str) -> bool:
     return False
 
 
-def _cleanup_past_yrt(slug: str, today: str) -> int:
-    """yrt 行のうち、IDに埋めた開催日が過去のものを削除する。"""
+def _cleanup_past_by_date_suffix(slug: str, today: str, kind: str) -> int:
+    """IDの末尾に埋めた開催日が過去になった行を削除する(yrt / ttx 共通)。
+
+    発見が機会依存の行(その日の検索や他グループの告知に出るかどうかで変わる)は、
+    今回出力されなかったことを「中止」と解釈できないため、再突合削除はしない。
+    """
     removed = 0
     ymd = today.replace("-", "")
     try:
-        for old_id in sb.get_auto_event_ids(slug, prefix=f"yrt:{slug}:"):
+        for old_id in sb.get_auto_event_ids(slug, prefix=f"{kind}:{slug}:"):
             m = re.search(r":(\d{8})$", old_id)
             if m and m.group(1) < ymd:
                 sb.delete_auto_event(old_id)
                 removed += 1
     except Exception as e:
-        print(f"  yrt の掃除でエラー: {e}")
+        print(f"  {kind} の掃除でエラー: {e}")
     return removed
+
+
+def _cleanup_past_yrt(slug: str, today: str) -> int:
+    return _cleanup_past_by_date_suffix(slug, today, "yrt")
 
 
 def _event_key(source: str, url: str) -> str:
