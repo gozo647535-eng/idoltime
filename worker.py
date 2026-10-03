@@ -852,6 +852,7 @@ def _note_site_calendars(slug: str, name: str, cal_links) -> int:
     if not cal_links:
         return 0
     pairs = []
+    keys = set()
     checked = set()
     for u in cal_links[:12]:
         m = re.search(r"(?:public_calendars/|timetr\.ee/p(?:c)?/)([A-Za-z0-9_.\-]+)", u)
@@ -862,15 +863,19 @@ def _note_site_calendars(slug: str, name: str, cal_links) -> int:
             checked.add(alias)
             title = timetree.calendar_name(alias)
             if title and timetree.calendar_belongs_to(name, title):
+                if f"ttfound:{slug}" in keys:
+                    continue   # 1グループにつき1件
                 print(f"    ★ 公式サイトのTimeTree「{title}」を巡回対象にします({alias})")
+                keys.add(f"ttfound:{slug}")
                 pairs.append((f"ttfound:{slug}", alias))
             elif title:
                 print(f"    公式サイトのTimeTree「{title}」は別物として見送り({alias})")
             continue
         cal_id = gcal.extract_calendar_id(u)
         # 同じカレンダーが複数の書き方で貼られていることがあるので、1組につき1件。
-        if cal_id and "@" in cal_id and not any(k == f"gcfound:{slug}" for k, _ in pairs):
+        if cal_id and "@" in cal_id and f"gcfound:{slug}" not in keys:
             print(f"    ★ 公式サイトのGoogleカレンダーを巡回対象にします({cal_id})")
+            keys.add(f"gcfound:{slug}")
             pairs.append((f"gcfound:{slug}", cal_id))
     if not pairs:
         return 0
@@ -927,6 +932,14 @@ def run_sites() -> int:
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     processed = []   # 巡回日を記録するグループ(枠切れで抽出できなかった分は入れない)
     found_cal = 0    # 公式サイトから見つけた公開カレンダーの数
+    try:
+        # すでにカレンダーがあるグループは探さない(カレンダー名の確認で毎回
+        # 取得が入るため)。自動発見済みの分もこの一覧に入っている。
+        cal_known = ({e["idol_slug"] for e in build_timetree_watch_list()}
+                     | {e["idol_slug"] for e in build_gcal_watch_list()})
+    except Exception as e:
+        print(f"  既存カレンダーの確認に失敗(全グループで探します): {e}")
+        cal_known = set()
     dead = 0         # LLMが連続して使えなかった回数
     for entry in watch:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
@@ -947,7 +960,8 @@ def run_sites() -> int:
             print(f"  サイト内にグループ名が出てきません。登録URLの見直しが必要です: {url}")
             processed.append(slug)
             continue
-        found_cal += _note_site_calendars(slug, name, cal_links)
+        if slug not in cal_known:
+            found_cal += _note_site_calendars(slug, name, cal_links)
         state_key = f"site:{slug}"
         # 本文/構造化データに変化が無ければ LLM を呼ばずにスキップ(無料枠の節約)。
         # ただし「本文に今後の日付があるのに抽出0件」だった回は <hash>|z1 を記録してあり、
