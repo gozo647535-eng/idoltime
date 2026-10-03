@@ -372,9 +372,15 @@ def calendar_name(alias: str):
     return re.sub(r"\s+", " ", m.group(1)).replace(" - TimeTree", "").strip()
 
 
+# 名前と同じ意味で使われる引用符の揺れ。Ma'Scar'Piece のカレンダー名は
+# 「Ma’Scar’Piece Official」で、アポストロフィが U+2019 になっている。
+_CAL_QUOTES = re.compile(r"['\u2018\u2019\u02bc\u00b4\u0060\u201c\u201d\"]")
+
+
 def _cal_core(s: str) -> str:
     s = re.sub(r"&#\d+;", "'", s or "")
-    return ticketdive._norm_name(_CAL_DECOR.sub("", unicodedata.normalize("NFKC", s)))
+    s = _CAL_QUOTES.sub("", unicodedata.normalize("NFKC", s))
+    return ticketdive._norm_name(_CAL_DECOR.sub("", s))
 
 
 def calendar_belongs_to(group_name: str, cal_title: str) -> bool:
