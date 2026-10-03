@@ -839,6 +839,47 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: 
     return picked
 
 
+def _note_site_calendars(slug: str, name: str, cal_links) -> int:
+    """公式サイトに貼られていた公開カレンダーを、巡回対象として記録する。
+
+    予定表をJSで描くサイトからLLMで読み取るより、カレンダーそのものを読むほうが
+    確実で、無料枠も使わない。別グループのカレンダーを貼っているサイトもあるので、
+    TimeTree はカレンダー名がグループ名と一致するものだけ採る。
+    Google カレンダーは名前が引けないので、そのグループのサイトに貼られている
+    ことを根拠に採る(サイト自体はグループ名の確認を通っている)。
+    """
+    if not cal_links:
+        return 0
+    pairs = []
+    checked = set()
+    for u in cal_links[:12]:
+        m = re.search(r"(?:public_calendars/|timetr\.ee/p(?:c)?/)([A-Za-z0-9_.\-]+)", u)
+        if m:
+            alias = m.group(1)
+            if alias in checked or len(checked) >= 3:
+                continue   # 同じカレンダーのイベントページが並ぶことがある
+            checked.add(alias)
+            title = timetree.calendar_name(alias)
+            if title and timetree.calendar_belongs_to(name, title):
+                print(f"    ★ 公式サイトのTimeTree「{title}」を巡回対象にします({alias})")
+                pairs.append((f"ttfound:{slug}", alias))
+            elif title:
+                print(f"    公式サイトのTimeTree「{title}」は別物として見送り({alias})")
+            continue
+        cal_id = gcal.extract_calendar_id(u)
+        if cal_id:
+            print(f"    ★ 公式サイトのGoogleカレンダーを巡回対象にします({cal_id})")
+            pairs.append((f"gcfound:{slug}", cal_id))
+    if not pairs:
+        return 0
+    try:
+        sb.set_last_seen_many(pairs)
+    except Exception as e:
+        print(f"    カレンダーの記録に失敗: {e}")
+        return 0
+    return len(pairs)
+
+
 def _site_mentions_group(name: str, text: str) -> bool:
     """サイト本文にグループ名が出てくるか。
 
@@ -883,12 +924,13 @@ def run_sites() -> int:
     total = 0
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     processed = []   # 巡回日を記録するグループ(枠切れで抽出できなかった分は入れない)
+    found_cal = 0    # 公式サイトから見つけた公開カレンダーの数
     dead = 0         # LLMが連続して使えなかった回数
     for entry in watch:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
         print(f"{name} の公式サイトを確認: {url}")
         try:
-            content_hash, combined, jsonld_events = sites.fetch_site_content(url)
+            content_hash, combined, jsonld_events, cal_links = sites.fetch_site_content(url)
         except Exception as e:
             print(f"  失敗: {e}")
             processed.append(slug)
@@ -903,6 +945,7 @@ def run_sites() -> int:
             print(f"  サイト内にグループ名が出てきません。登録URLの見直しが必要です: {url}")
             processed.append(slug)
             continue
+        found_cal += _note_site_calendars(slug, name, cal_links)
         state_key = f"site:{slug}"
         # 本文/構造化データに変化が無ければ LLM を呼ばずにスキップ(無料枠の節約)。
         # ただし「本文に今後の日付があるのに抽出0件」だった回は <hash>|z1 を記録してあり、
@@ -976,7 +1019,8 @@ def run_sites() -> int:
             sb.set_last_seen_many([(f"sq:{s2}", today) for s2 in processed])
         except Exception as e:
             print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e}")
-    print(f"公式サイト取り込み完了: 合計 {total} 件 / 巡回できた {len(processed)} 件")
+    print(f"公式サイト取り込み完了: 合計 {total} 件 / 巡回できた {len(processed)} 件"
+          + (f" / 公開カレンダーを {found_cal} 件発見" if found_cal else ""))
     return total
 
 

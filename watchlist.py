@@ -182,7 +182,32 @@ def build_gcal_watch_list():
     except Exception as e:
         print(f"idol_info の取得に失敗(Googleカレンダー・スキップ): {e}")
 
+    watch += _auto_found("gcfound:", seen, "gc_url",
+                         lambda v: f"https://calendar.google.com/calendar/embed?src={v}",
+                         "Googleカレンダー")
     return watch
+
+
+def _auto_found(prefix: str, seen: set, url_key: str, to_url, label: str):
+    """ワーカーが公式サイトから見つけたカレンダーを監視対象の形にして返す。
+
+    図鑑に登録があるグループは上で seen に入っているので、ここでは足さない
+    (図鑑の登録を優先する)。値が "-" の行は「使わない」印として扱う。
+    """
+    out = []
+    try:
+        names = {i["idol_slug"]: i["name"] for i in build_idol_name_list()}
+        for key, value in sb.get_last_seen_by_prefix(prefix).items():
+            slug = key[len(prefix):]
+            if not value or value == "-" or slug in seen or slug not in names:
+                continue
+            out.append({"idol_slug": slug, "name": names[slug], url_key: to_url(value)})
+            seen.add(slug)
+        if out:
+            print(f"公式サイトから見つけた{label}: {len(out)} 件を監視対象に追加")
+    except Exception as e:
+        print(f"自動発見した{label}の読み込みに失敗(スキップ): {e}")
+    return out
 
 
 def build_timetree_watch_list():
@@ -211,6 +236,9 @@ def build_timetree_watch_list():
     except Exception as e:
         print(f"idol_info の取得に失敗(TimeTree・スキップ): {e}")
 
+    watch += _auto_found("ttfound:", seen, "tt_url",
+                         lambda v: f"https://timetreeapp.com/public_calendars/{v}",
+                         "TimeTree")
     return watch
 
 

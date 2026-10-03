@@ -1110,9 +1110,28 @@ def _fetch_subpage(url: str):
     return h
 
 
+# 公式サイトに貼られている公開カレンダー。予定表をJSで描くサイトからLLMで
+# 読み取るより、カレンダーそのものを読むほうが確実で無料枠も使わない。
+_CALENDAR_LINK_RE = re.compile(
+    r"https?://(?:timetreeapp\.com/public_calendars/|timetr\.ee/p(?:c)?/)([A-Za-z0-9_.\-]+)"
+    r"|https?://calendar\.google\.com/calendar/(?:embed|u/0)?[^\"'\s<>]*",
+    re.IGNORECASE)
+
+
+def calendar_links(html: str):
+    """HTML 中の TimeTree / Google カレンダーのURLを重複なく返す。"""
+    out = []
+    for m in _CALENDAR_LINK_RE.finditer(html or ""):
+        u = m.group(0).replace("&amp;", "&")
+        if u not in out:
+            out.append(u)
+    return out
+
+
 def fetch_site_content(site_url: str):
     """公式サイト(+ News/Schedule サブページ)を取得し (content_hash, combined_text, jsonld_events)
-    を返す。取得できなければ (None, '', [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
+    を返す(併せて、ページに貼られている公開カレンダーのURLも返す)。
+    取得できなければ (None, '', [], [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
     変化があるときだけ extract_events を呼ぶことで、無料枠の消費を最小化する)。
     静的HTMLの可視テキストが極端に短い(JS描画のSPA)場合は、ヘッドレスChromiumで
     描画し直す(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。
@@ -1168,8 +1187,14 @@ def fetch_site_content(site_url: str):
     if jsonld_events:
         print(f"    JSON-LDから {len(jsonld_events)} 件のイベントを検出")
 
+    cal_links = []
+    for h in htmls:
+        for u in calendar_links(h):
+            if u not in cal_links:
+                cal_links.append(u)
+
     if not texts and not jsonld_events:
-        return None, "", []
+        return None, "", [], cal_links
     combined = "\n\n".join(texts)
     # PROMPT_VERSION と JSON-LD署名を含めることで、本文/構造化データが変わると再抽出が走る。
     # JS描画で本文が変われば content_hash も変わるため、既読SPAサイトも自動で再抽出される。
@@ -1177,7 +1202,7 @@ def fetch_site_content(site_url: str):
     content_hash = hashlib.sha1(
         (PROMPT_VERSION + "\n" + combined + "\n" + ld_sig).encode("utf-8", "ignore")
     ).hexdigest()
-    return content_hash, combined, jsonld_events
+    return content_hash, combined, jsonld_events, cal_links
 
 
 def has_future_dates(text: str) -> bool:

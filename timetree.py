@@ -14,11 +14,14 @@ import gzip
 import hashlib
 import json
 import re
+import unicodedata
 import urllib.request
 from typing import List, Optional
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
+
+import ticketdive  # 名前の正規化(装飾記号を落とす)を共用する
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 # Web クライアントが送る固定ヘッダ。値は "web/<ver>/<locale>" 形式であれば良い。
@@ -336,3 +339,47 @@ def fetch_public_events(alias: str):
             "page_url": (ev.get("url") or "").strip() or None,
         })
     return content_hash, events
+
+# --- 公開カレンダーの持ち主の確認 -------------------------------------------
+# 自動発見したカレンダーをそのまま登録すると、名前が似た別グループや非公式の
+# カレンダーを取り込んでしまう(Appare! に appare☆ず のカレンダーが入っていた)。
+# カレンダー名から定型の飾りを落として、グループ名と一致するものだけ通す。
+_CAL_DECOR = re.compile(
+    r"(公式|オフィシャル|official|スケジュール|schedule|カレンダー|calendar|ライブ|live|"
+    r"イベント|event|情報|予定|日程|お知らせ|info|フォロー|更新|最新)", re.IGNORECASE)
+_CAL_REJECT = re.compile(r"(非公式|unofficial|ファン|fan\b|個人|私用|勉強|仕事|バイト)", re.IGNORECASE)
+
+
+def calendar_name(alias: str):
+    """公開カレンダーの名前(ページの <title>)。取れなければ None。"""
+    # _get は公開イベントAPI用のヘッダ(X-TimeTreeA / Accept: application/json)を
+    # 送るため、HTMLのページには 404 を返される。ここはブラウザとして取る。
+    url = f"https://timetreeapp.com/public_calendars/{alias}"
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"})
+        r = urllib.request.urlopen(req, timeout=20)
+        raw = r.read()
+        if r.headers.get("Content-Encoding") == "gzip":
+            raw = gzip.decompress(raw)
+    except Exception as e:
+        print(f"    TimeTree カレンダー名の取得失敗 {alias}: {e}")
+        return None
+    html = raw.decode("utf-8", "replace")
+    m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+    if not m:
+        return None
+    return re.sub(r"\s+", " ", m.group(1)).replace(" - TimeTree", "").strip()
+
+
+def _cal_core(s: str) -> str:
+    s = re.sub(r"&#\d+;", "'", s or "")
+    return ticketdive._norm_name(_CAL_DECOR.sub("", unicodedata.normalize("NFKC", s)))
+
+
+def calendar_belongs_to(group_name: str, cal_title: str) -> bool:
+    """カレンダー名がそのグループのものと言えるか(飾りを除いて完全一致)。"""
+    if not cal_title or _CAL_REJECT.search(cal_title):
+        return False
+    nm, ct = _cal_core(group_name), _cal_core(cal_title)
+    return bool(nm) and len(nm) >= 3 and nm == ct
