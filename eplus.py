@@ -30,6 +30,18 @@ _LD_RE = re.compile(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script
 _TITLE_RE = re.compile(r"(?is)<title[^>]*>(.*?)</title>")
 # 「○○／一般発売」「／プレオーダー受付」など、券種のラベルは公演名ではない
 _SALE_SUFFIX = re.compile(r"\s*／.*$")
+# 券種ラベルだけの行。「★一般発売」「プレオーダー受付」等は公演名ではない。
+# i☆Ris の横浜アリーナ公演が「一般発売」という名前で入ってしまった。
+# 語を1つずつ消して、何も残らなければラベルだけと判断する。
+_SALE_TOKENS = re.compile(
+    r"(一般|先行|最速|二次|三次|四次|先着|学生|会員|FC|ファンクラブ|オフィシャル|チケット|当日|"
+    r"プレオーダー|プレリザーブ|オフィシャル|発売|受付|抽選|申込|予約|販売|中|開始|分|[★☆\s])")
+
+
+def _is_sale_label(title: str) -> bool:
+    return not _SALE_TOKENS.sub("", title or "").strip()
+
+
 _WS = re.compile(r"\s+")
 
 
@@ -123,7 +135,7 @@ def fetch_public_events(page_url: str):
         name = _SALE_SUFFIX.sub("", _WS.sub(" ", (ev.get("name") or "").strip()))
         name = re.sub(r"^[★☆]+", "", name).strip()
         title = timetree._core_name(name) or name
-        if not title or timetree.looks_placeholder(title):
+        if not title or timetree.looks_placeholder(title) or _is_sale_label(title):
             title = None
         # 同じ公演が券種ごとに並ぶので、日付+会場でまとめ、名前のある行を優先する
         k = (str(day), venue)
