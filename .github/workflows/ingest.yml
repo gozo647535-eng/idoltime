@@ -20,6 +20,14 @@ on:
         description: "チケットサイト発見のみ実行(数分・サイト巡回とTimeTreeをスキップ)"
         type: boolean
         default: false
+      site_only:
+        description: "公式サイト巡回のみ実行(TimeTree・e+・発見をスキップ)"
+        type: boolean
+        default: false
+      site_slugs:
+        description: "巡回するグループのslugをカンマ区切りで指定(順番待ちとsite_skipを無視。取れないサイトの切り分け用)"
+        type: string
+        default: ""
 
 concurrency:
   group: ingest
@@ -70,6 +78,9 @@ jobs:
           PYTHONUNBUFFERED: "1"
           # 発見のみモード: 高頻度側の cron、または手動実行のチェックで有効になる
           DISCOVERY_ONLY: ${{ github.event.schedule == '37 3,11,19 * * *' || github.event.inputs.discovery_only == 'true' }}
+          # 公式サイト巡回のみ / 対象グループの限定(どちらも手動実行の切り分け用)
+          SITE_ONLY: ${{ github.event.inputs.site_only }}
+          SITE_SLUGS: ${{ github.event.inputs.site_slugs }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}
           X_EMAIL: ${{ secrets.X_EMAIL }}

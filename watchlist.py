@@ -238,12 +238,13 @@ def site_skip_slugs():
     return _load_site_skip()
 
 
-def build_site_watch_list():
+def build_site_watch_list(include_skipped: bool = False):
     """図鑑カタログ + 有志追記から、公式サイト監視対象 [{idol_slug, name, site_url}] を作る。
-    site_skip.json に挙げた slug は除外する。"""
+    site_skip.json に挙げた slug は除外する(include_skipped=True なら除外しない。
+    特定グループだけを指定して動作を確かめるときに使う)。"""
     seen = set()
     watch = []
-    skip = _load_site_skip()
+    skip = set() if include_skipped else _load_site_skip()
     skipped = []
 
     def add(slug, name, links):

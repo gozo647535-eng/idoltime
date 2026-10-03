@@ -836,13 +836,24 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str):
 def run_sites() -> int:
     """公式サイトを巡回してイベント/チケット情報を取り込む(主軸)。
     JSON-LD(schema.org Event)を Gemini不要で抽出し、Gemini解析結果と統合する。"""
-    watch = build_site_watch_list()
+    # SITE_SLUGS を渡すと、そのグループだけを順番待ち(ローテーション)や
+    # site_skip.json に関係なく巡回する。取れないサイトの原因を短時間で確かめる用。
+    only = [s for s in os.environ.get("SITE_SLUGS", "").split(",") if s.strip()]
+    watch = build_site_watch_list(include_skipped=bool(only))
     if not watch:
         print("公式サイトの監視対象がありません(図鑑に公式サイトURLが未登録の可能性)。")
         return 0
     print(f"公式サイト監視対象: {len(watch)} 件")
-    watch = _rotate(watch, datetime.datetime.now(JST).strftime("%Y-%m-%d"),
-                    "sq", SITE_BATCH, "公式サイト")
+    if only:
+        want = {s.strip() for s in only}
+        watch = [w for w in watch if w["idol_slug"] in want]
+        print(f"SITE_SLUGS 指定: {len(watch)} 件のみ巡回します")
+        missing = want - {w["idol_slug"] for w in watch}
+        if missing:
+            print(f"  公式サイトリンクが無く巡回できない slug: {', '.join(sorted(missing))}")
+    else:
+        watch = _rotate(watch, datetime.datetime.now(JST).strftime("%Y-%m-%d"),
+                        "sq", SITE_BATCH, "公式サイト")
     total = 0
     for entry in watch:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
@@ -1403,6 +1414,10 @@ def main() -> int:
     discovery_only = os.environ.get("DISCOVERY_ONLY", "").lower() == "true"
     if discovery_only:
         run_yahoo_rt()
+        return 0
+    # SITE_ONLY=true は公式サイト巡回だけを回す確認用(数分)。
+    if os.environ.get("SITE_ONLY", "").lower() == "true":
+        run_sites()
         return 0
     if not x_only:
         run_sites()
