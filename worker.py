@@ -868,7 +868,8 @@ def _note_site_calendars(slug: str, name: str, cal_links) -> int:
                 print(f"    公式サイトのTimeTree「{title}」は別物として見送り({alias})")
             continue
         cal_id = gcal.extract_calendar_id(u)
-        if cal_id:
+        # 同じカレンダーが複数の書き方で貼られていることがあるので、1組につき1件。
+        if cal_id and "@" in cal_id and not any(k == f"gcfound:{slug}" for k, _ in pairs):
             print(f"    ★ 公式サイトのGoogleカレンダーを巡回対象にします({cal_id})")
             pairs.append((f"gcfound:{slug}", cal_id))
     if not pairs:

@@ -37,17 +37,25 @@ def extract_calendar_id(url: str):
         return urllib.parse.unquote(m.group(1)) if m else None
     q = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
     if q.get("src"):
-        return urllib.parse.unquote(q["src"][0])
+        return _decoded_id(urllib.parse.unquote(q["src"][0]))
     if q.get("cid"):
-        v = urllib.parse.unquote(q["cid"][0])
-        try:
-            d = base64.b64decode(v + "=" * (-len(v) % 4)).decode("utf-8")
-            if "@" in d:
-                return d
-        except Exception:
-            pass
-        return v if "@" in v else None
+        v = _decoded_id(urllib.parse.unquote(q["cid"][0]))
+        return v if v and "@" in v else None
     return None
+
+
+def _decoded_id(v: str):
+    """src/cid の値。base64 で入っていることがある(同じカレンダーが2通りの
+    書き方で貼られていると、復号しない側が別IDとして記録されてしまう)。"""
+    if not v or "@" in v:
+        return v
+    try:
+        d = base64.b64decode(v + "=" * (-len(v) % 4)).decode("utf-8")
+        if "@" in d:
+            return d
+    except Exception:
+        pass
+    return v
 
 
 def ics_url(cal_id: str) -> str:
