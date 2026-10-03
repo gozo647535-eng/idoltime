@@ -1449,7 +1449,7 @@ def _yrt_cache_key(source: str, url: str) -> str:
     return f"yrtu:{source}:{_event_key(source, url)}"
 
 
-def run_yahoo_rt() -> int:
+def run_yahoo_rt(discover_sites: bool = True) -> int:
     """Yahoo! リアルタイム検索で X 上のチケットサイト(TicketDive / LivePocket / TiGET)の
     リンクを発見し、出演者が図鑑の登録グループと一致するイベントを取り込む。
 
@@ -1513,7 +1513,10 @@ def run_yahoo_rt() -> int:
             except Exception as e:
                 print(f"  書き込み失敗({len(batch)}件): {e}")
 
-    _discover_official_sites(other_urls, qmap)
+    # 公式サイトの発見は候補ごとに取得が入るので1日1回(フル巡回)だけにする。
+    # 発見のみモードは1日3回あり、ここを足すと無料枠(2,000分/月)を超えてしまう。
+    if discover_sites:
+        _discover_official_sites(other_urls, qmap)
 
     # 発見は機会依存(今日の検索に出ない=中止ではない)ので再突合削除はせず、
     # 開催日が過ぎた行だけを掃除する。
@@ -1627,7 +1630,7 @@ def main() -> int:
     # 重いサイト巡回(Groqのレート順守で約30分)を挟まずに済むので、高頻度で実行できる。
     discovery_only = os.environ.get("DISCOVERY_ONLY", "").lower() == "true"
     if discovery_only:
-        run_yahoo_rt()
+        run_yahoo_rt(discover_sites=False)
         # 掃除は読み書きが数回で済むので、軽量モードでも回す。図鑑のリンクを
         # 直した日に、フル巡回(1日1回)を待たずに古い予定が消えるようにする。
         cleanup_orphan_rows()
