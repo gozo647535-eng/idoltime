@@ -184,7 +184,7 @@ def build_gcal_watch_list():
 
     watch += _auto_found("gcfound:", seen, "gc_url",
                          lambda v: f"https://calendar.google.com/calendar/embed?src={v}",
-                         "Googleカレンダー")
+                         "公式サイトのGoogleカレンダー")
     return watch
 
 
@@ -204,7 +204,7 @@ def _auto_found(prefix: str, seen: set, url_key: str, to_url, label: str):
             out.append({"idol_slug": slug, "name": names[slug], url_key: to_url(value)})
             seen.add(slug)
         if out:
-            print(f"公式サイトから見つけた{label}: {len(out)} 件を監視対象に追加")
+            print(f"自動で見つけた{label}: {len(out)} 件を監視対象に追加")
     except Exception as e:
         print(f"自動発見した{label}の読み込みに失敗(スキップ): {e}")
     return out
@@ -238,7 +238,7 @@ def build_timetree_watch_list():
 
     watch += _auto_found("ttfound:", seen, "tt_url",
                          lambda v: f"https://timetreeapp.com/public_calendars/{v}",
-                         "TimeTree")
+                         "公式サイトのTimeTree")
     return watch
 
 
@@ -303,7 +303,7 @@ def build_site_watch_list(include_skipped: bool = False):
     if skipped:
         print(f"公式サイト巡回から除外: {len(skipped)} 件(site_skip.json)")
     # site_skip.json の slug は上で seen に入っているので、自動発見分でも足されない
-    watch += _auto_found("sitefound:", seen, "site_url", lambda v: v, "公式サイト")
+    watch += _auto_found("sitefound:", seen, "site_url", lambda v: v, "投稿からの公式サイト")
     return watch
 
 
