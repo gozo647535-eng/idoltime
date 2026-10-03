@@ -377,9 +377,15 @@ def calendar_name(alias: str):
 _CAL_QUOTES = re.compile(r"['\u2018\u2019\u02bc\u00b4\u0060\u201c\u201d\"]")
 
 
+# 読みや補足を囲む括弧。THE ENCORE のカレンダー名は「THE ENCORE【アンコール】」。
+# 【非公式】の判定は括弧を外す前の名前に対して行うので、ここで落として差し支えない。
+_CAL_BRACKETS = re.compile(r"[【（(\[［][^】）)\]］]{0,20}[】）)\]］]")
+
+
 def _cal_core(s: str) -> str:
     s = re.sub(r"&#\d+;", "'", s or "")
     s = _CAL_QUOTES.sub("", unicodedata.normalize("NFKC", s))
+    s = _CAL_BRACKETS.sub("", s)
     return ticketdive._norm_name(_CAL_DECOR.sub("", s))
 
 
