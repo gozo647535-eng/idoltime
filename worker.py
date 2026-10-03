@@ -1341,7 +1341,10 @@ def _discover_official_sites(other_urls: dict, qmap: dict) -> int:
             cal = sites.calendar_links(html)
             if not text:
                 continue
-            if not _site_mentions_group(g["name"], text):
+            # 本文にグループ名が出てくるだけでは、そのグループを取り上げた記事や
+            # ファンのブログも通ってしまう。公式サイトはページの見出し(<title>)に
+            # グループ名を置いている(実測7サイトすべて)ので、そこで見る。
+            if not _site_mentions_group(g["name"], sites._page_title(html)):
                 continue
             if not (sites.has_future_dates(text) or cal):
                 print(f"  {g['name']}: 候補 {host} は予定が見当たらないので見送り")
