@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 import sb  # Supabase 入出力(標準ライブラリのみ)
 import sites  # 公式サイトからの取得エンジン(主軸)
+import eplus  # イープラス(e+)からの取得エンジン
 import gcal  # Google 公開カレンダー(ICS)からの取得エンジン
 import lineup  # 出演欄から図鑑の登録グループを突合
 import timetree  # TimeTree 公開カレンダーからの取得エンジン
@@ -654,6 +655,119 @@ def run_gcal() -> int:
     return total
 
 
+# 1回のフル実行で e+ を見るグループ数。解決済みURLはキャッシュするので
+# 2回目以降は1グループ1リクエストで済む。
+EPLUS_BATCH = int(os.environ.get("EPLUS_BATCH", "60"))
+
+
+def build_eplus_row(slug: str, name: str, page_url: str, ev: dict) -> Optional[dict]:
+    """e+ の整形済みイベントを auto_events 行に変換。"""
+    if not ev.get("title"):
+        return None
+    return {
+        "tweet_id": f"ep:{slug}:{ev['id']}",
+        "idol_slug": slug,
+        "account": None,
+        "event_name": ev["title"],
+        "event_datetime": normalize_event_datetime(ev.get("event_datetime")),
+        "open_time": None,
+        "entry_time": None,
+        "sale_datetime": None,
+        "is_first_come": False,
+        "ticket_url": ev.get("ticket_url"),
+        "ticket_types": [],
+        "max_tickets": None,
+        "other_details": clean_venue(ev.get("venue")),
+        "raw_text": None,
+        "tweet_url": ev.get("page_url") or page_url,
+    }
+
+
+def run_eplus() -> int:
+    """イープラスのアーティストページから公演を取り込む。
+
+    メジャー/大箱系はチケットを ぴあ・e+・ローソン で売るため、
+    ticketdive/livepocket/tiget しか見ない Yahoo 発見では届かない。
+    e+ は JSON-LD の schema.org/Event を持っているので LLM 不要で取れる。
+    """
+    idols = build_idol_name_list()
+    if not idols:
+        return 0
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    # 出演情報が少ないグループを優先して回す(多いグループは他経路で取れている)
+    try:
+        counts = sb.get_upcoming_counts(today)
+    except Exception:
+        counts = {}
+    try:
+        cached = sb.get_last_seen_by_prefix("epu:")
+    except Exception:
+        cached = {}
+    # 出演情報が少ないグループを優先(多いグループは他経路で取れている)。
+    # 次に、前回解決した日が古いものから。
+    idols = sorted(idols, key=lambda i: (counts.get(i["idol_slug"], 0),
+                                         cached.get(f"epd:{i['idol_slug']}") or ""))
+    picked = idols[:EPLUS_BATCH]
+    print(f"イープラス: {len(picked)} / {len(idols)} 組を確認します")
+    # e+ の行は出演者欄を持たないので、対バンの相互反映は行わない。
+    total = 0
+    resolved = []
+    for idol in picked:
+        slug, name = idol["idol_slug"], idol["name"]
+        page = cached.get(f"epu:{slug}")
+        if page == "-":
+            continue  # 前回「e+ に該当なし」と分かっているので検索しない
+        if not page:
+            try:
+                page = eplus.resolve_page(name)
+            except Exception as e:
+                print(f"  {name}: e+ の解決に失敗: {e}")
+                continue
+            resolved.append((f"epu:{slug}", page or "-"))
+            if not page:
+                continue
+        resolved.append((f"epd:{slug}", today))
+        try:
+            content_hash, events = eplus.fetch_public_events(page)
+        except Exception as e:
+            print(f"  {name}: e+ の取得に失敗: {e}")
+            continue
+        if content_hash is None:
+            continue
+        state_key = f"ep:{page}"
+        if sb.get_last_seen(state_key) == content_hash:
+            continue
+        rows, emitted = [], set()
+        for ev in events:
+            row = build_eplus_row(slug, name, page, ev)
+            if row:
+                rows.append(row)
+                emitted.add(row["tweet_id"])
+        if rows:
+            try:
+                sb.upsert_auto_events(rows)
+            except Exception as e:
+                print(f"  {name}: 書き込み失敗({len(rows)}件): {e}")
+                continue
+            print(f"  {name}: {len(rows)} 件反映")
+            total += len(rows)
+        removed = 0
+        try:
+            for old_id in sb.get_auto_event_ids(slug, prefix=f"ep:{slug}:"):
+                if old_id not in emitted:
+                    sb.delete_auto_event(old_id)
+                    removed += 1
+        except Exception as e:
+            print(f"  {name}: 再突合(削除)でエラー: {e}")
+        sb.set_last_seen(state_key, content_hash)
+    try:
+        sb.set_last_seen_many(resolved)
+    except Exception as e:
+        print(f"  e+ の解決結果の記録に失敗: {e}")
+    print(f"イープラス取り込み完了: 合計 {total} 件")
+    return total
+
+
 def _site_event_dedup_key(name, datetime_str):
     """同一公演の重複判定キー(正規化した名前 + 日付部分)。"""
     n = re.sub(r"\s+", "", (name or "").lower())
@@ -1207,6 +1321,7 @@ def main() -> int:
         run_sites()
         run_timetree()
         run_gcal()
+        run_eplus()
         run_yahoo_rt()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())
