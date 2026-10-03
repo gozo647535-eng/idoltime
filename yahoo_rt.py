@@ -153,10 +153,13 @@ def collect_ticketdive_urls(queries: List[str], limit: int = 60) -> List[str]:
     return list(found)
 
 
-def collect_event_urls(queries: List[str], limit_per_site: int = 60) -> Dict[str, List[str]]:
+def collect_event_urls(queries: List[str], limit_per_site: int = 60,
+                       other_urls: Dict[str, List[str]] = None) -> Dict[str, List[str]]:
     """複数クエリを検索し、チケットサイトごとにイベントURLを重複なく集めて返す。
 
     同一イベントを指す短縮URLと正規URLは、末尾の識別子で重複排除する。
+    other_urls を渡すと、チケットサイト以外のURLもクエリごとに記録する
+    (グループの公式サイトを見つけるのに使う。検索を増やさずに済む)。
     """
     found: Dict[str, Dict[str, None]] = {k: {} for k in SITE_PATTERNS}
     seen_keys: Dict[str, set] = {k: set() for k in SITE_PATTERNS}
@@ -165,6 +168,11 @@ def collect_event_urls(queries: List[str], limit_per_site: int = 60) -> Dict[str
         hits = 0
         for e in posts:
             for u in _urls_in_post(e):
+                if other_urls is not None and not any(
+                        p.match(u) for p in SITE_PATTERNS.values()):
+                    other_urls.setdefault(q, [])
+                    if u not in other_urls[q]:
+                        other_urls[q].append(u)
                 for site, pat in SITE_PATTERNS.items():
                     m = pat.match(u)
                     if not m:

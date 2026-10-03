@@ -302,6 +302,8 @@ def build_site_watch_list(include_skipped: bool = False):
 
     if skipped:
         print(f"公式サイト巡回から除外: {len(skipped)} 件(site_skip.json)")
+    # site_skip.json の slug は上で seen に入っているので、自動発見分でも足されない
+    watch += _auto_found("sitefound:", seen, "site_url", lambda v: v, "公式サイト")
     return watch
 
 

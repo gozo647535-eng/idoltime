@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import re
 import traceback
+import urllib.parse
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -1207,7 +1208,7 @@ YRT_QUERIES = [
 GROUP_QUERY_BATCH = int(os.environ.get("GROUP_QUERY_BATCH", "45"))
 
 
-def _group_search_queries(today: str) -> List[str]:
+def _group_search_queries(today: str) -> List[dict]:
     """このラウンドで名前検索するグループのクエリを返す。
 
     優先順位は
@@ -1263,7 +1264,100 @@ def _group_search_queries(today: str) -> List[str]:
         thin = sum(1 for p in picked if p[1] < 3)
         print(f"グループ名検索: {len(picked)} 件 "
               f"(他経路なし {no_other} 件 / 今後3件未満 {thin} 件 / 候補 {len(ranked)} 件)")
-    return [q for *_, _slug, q in picked]
+    names = {i["idol_slug"]: i["name"] for i in idols}
+    return [{"idol_slug": slug, "name": names.get(slug, slug), "query": q}
+            for *_, slug, q in picked]
+
+
+# 1回の実行で公式サイトを探すグループ数の上限(候補ごとに取得が入るため)
+SITE_DISCOVERY_LIMIT = int(os.environ.get("SITE_DISCOVERY_LIMIT", "20"))
+
+# 公式サイトではないホスト。投稿に出てくるURLの大半はこれらなので、先に落とす。
+_NOT_OFFICIAL_HOSTS = (
+    "x.com", "twitter.com", "t.co", "fb.me", "facebook.com", "instagram.com",
+    "threads.net", "tiktok.com", "youtube.com", "youtu.be", "nicovideo.jp",
+    "twitcasting.tv", "showroom-live.com", "mixch.tv", "17.live", "zaiko.io",
+    "spotify.com", "apple.com", "linkco.re", "lnk.to", "linktr.ee", "lit.link",
+    "line.me", "note.com", "ameblo.jp", "hatenablog.com", "fanicon.net",
+    "natalie.mu", "realsound.jp", "barks.jp", "oricon.co.jp", "billboard-japan.com",
+    "walkerplus.com", "eiga.com", "prtimes.jp", "google.com", "docs.google.com",
+    "forms.gle", "amazon.co.jp", "rakuten.co.jp", "tower.jp", "hmv.co.jp",
+    "eplus.jp", "l-tike.com", "pia.jp", "zan-live.com", "shindanmaker.com",
+    "timetreeapp.com", "timetr.ee", "wikipedia.org", "idol-", "matome",
+)
+
+
+def _discover_official_sites(other_urls: dict, qmap: dict) -> int:
+    """グループ名検索の投稿に出てきたURLから、そのグループの公式サイトを見つける。
+
+    図鑑にリンクが1つも無いグループが200組以上あり、その多くは公式サイトの
+    URLが分からないままになっている。チケットサイトの発見で既に投稿は取って
+    いるので、そこに出てくる他のURLを見れば検索を増やさずに候補が得られる。
+
+    誤登録を避けるため、ホストのトップページを取って
+      ① 本文にグループ名が出てくる(事務所や販売店のサイトを弾く)
+      ② 今後の日付がある、またはカレンダーが貼られている
+    の両方を満たすものだけを記録する。
+    """
+    if not other_urls or not qmap:
+        return 0
+    try:
+        have_site = {e["idol_slug"] for e in build_site_watch_list()} | site_skip_slugs()
+    except Exception as e:
+        print(f"公式サイト発見: 既存の登録を確認できないため中止します: {e}")
+        return 0
+    found = []
+    checked_groups = 0
+    for query, urls in other_urls.items():
+        g = qmap.get(query)
+        if not g or g["idol_slug"] in have_site:
+            continue
+        if checked_groups >= SITE_DISCOVERY_LIMIT:
+            break
+        checked_groups += 1
+        seen_hosts = set()
+        for u in urls:
+            try:
+                host = urllib.parse.urlparse(u).netloc.lower()
+            except Exception:
+                continue
+            host = host[4:] if host.startswith("www.") else host
+            if not host or host in seen_hosts or len(seen_hosts) >= 3:
+                continue
+            if any(bad in host for bad in _NOT_OFFICIAL_HOSTS):
+                continue
+            seen_hosts.add(host)
+            root = f"https://{host}/"
+            # 候補の確認はトップページのHTMLだけで済ませる(サブページ取得やJS描画を
+            # 挟むと1組あたり十数秒かかり、発見モードの実行時間に収まらない)。
+            try:
+                html = sites._get(root)
+            except Exception as e:
+                print(f"  {g['name']}: 候補 {host} の取得に失敗: {e}")
+                continue
+            if not html:
+                continue
+            text = sites._html_to_text(html)
+            cal = sites.calendar_links(html)
+            if not text:
+                continue
+            if not _site_mentions_group(g["name"], text):
+                continue
+            if not (sites.has_future_dates(text) or cal):
+                print(f"  {g['name']}: 候補 {host} は予定が見当たらないので見送り")
+                continue
+            print(f"  ★ {g['name']}: 公式サイトらしいサイトを見つけました {root}")
+            found.append((f"sitefound:{g['idol_slug']}", root))
+            break
+    if not found:
+        return 0
+    try:
+        sb.set_last_seen_many(found)
+    except Exception as e:
+        print(f"公式サイト発見: 記録に失敗: {e}")
+        return 0
+    print(f"公式サイト発見: {len(found)} 件を巡回対象に追加しました")
+    return len(found)
 
 
 def _artists_match_idol(artists, idol_name: str) -> bool:
@@ -1363,10 +1457,14 @@ def run_yahoo_rt() -> int:
         print("登録アイドルを取得できないため Yahoo リアルタイム取り込みをスキップ。")
         return 0
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
-    queries = list(YRT_QUERIES) + _group_search_queries(today)
+    groups = _group_search_queries(today)
+    qmap = {g["query"]: g for g in groups}
+    queries = list(YRT_QUERIES) + [g["query"] for g in groups]
+    other_urls: dict = {}
     # クエリ数が増えるため、サイトごとの上限も引き上げる(当日取得済みURLは
     # キャッシュで省かれるので、2回目以降の取得コストは増えない)。
-    by_site = yahoo_rt.collect_event_urls(queries, limit_per_site=150)
+    by_site = yahoo_rt.collect_event_urls(queries, limit_per_site=150,
+                                          other_urls=other_urls)
     total_urls = sum(len(v) for v in by_site.values())
     if not total_urls:
         print("Yahooリアルタイム: チケットサイトのリンクは見つかりませんでした。")
@@ -1410,6 +1508,8 @@ def run_yahoo_rt() -> int:
                 total += len(batch)
             except Exception as e:
                 print(f"  書き込み失敗({len(batch)}件): {e}")
+
+    _discover_official_sites(other_urls, qmap)
 
     # 発見は機会依存(今日の検索に出ない=中止ではない)ので再突合削除はせず、
     # 開催日が過ぎた行だけを掃除する。
