@@ -1480,6 +1480,9 @@ def main() -> int:
     discovery_only = os.environ.get("DISCOVERY_ONLY", "").lower() == "true"
     if discovery_only:
         run_yahoo_rt()
+        # 掃除は読み書きが数回で済むので、軽量モードでも回す。図鑑のリンクを
+        # 直した日に、フル巡回(1日1回)を待たずに古い予定が消えるようにする。
+        cleanup_orphan_rows()
         return 0
     # SITE_ONLY=true は公式サイト巡回だけを回す確認用(数分)。
     if os.environ.get("SITE_ONLY", "").lower() == "true":
