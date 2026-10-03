@@ -29,7 +29,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v17"
+PROMPT_VERSION = "v18"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -682,6 +682,110 @@ def _parse_jsonld_events(html: str) -> List[SiteEvent]:
 
 
 # イベントに関係する行を見分けるためのシグナル(日付・時刻・チケット・公演語)
+# 「10.05」と「MON.2026」のように、月日と年が別の要素に分かれて書かれている予定表。
+# <time class="md">10.05</time><time class="year">MON.2026</time> のような作りは多く、
+# このままでは日付として認識できず(ドット区切りの月日はどの正規表現にも当たらない)、
+# 予定のかたまりが「日付なし」と見なされて凝縮で捨てられていた(≒JOY 等)。
+_SPLIT_MD = re.compile(r"^\s*(\d{1,2})[./](\d{1,2})\s*(?:[（(][^）)]{1,4}[）)])?\s*$")
+_SPLIT_YEAR = re.compile(r"^\s*[^\d]{0,8}(20\d\d)\s*年?\s*$")
+
+
+def stitch_split_dates(text: str) -> str:
+    """月日だけの行と年だけの行が隣り合っている箇所を『2026.10.05』に組み直す。
+
+    どちら向き(月日→年 / 年→月日)にも並ぶので両方見る。組み直した行は
+    既存の『20\d\d[./年]…』の判定に当たるようになる。
+    """
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        md = _SPLIT_MD.match(ln)
+        if not md:
+            continue
+        for j in (i + 1, i - 1):
+            if not 0 <= j < len(lines):
+                continue
+            ym = _SPLIT_YEAR.match(lines[j])
+            if not ym:
+                continue
+            mm, dd = int(md.group(1)), int(md.group(2))
+            if not (1 <= mm <= 12 and 1 <= dd <= 31):
+                break
+            lines[i] = f"{ym.group(1)}.{mm:02d}.{dd:02d}{ln.strip()[len(md.group(1)) + len(md.group(2)) + 1:]}"
+            break
+    return "\n".join(lines)
+
+
+# 月めくりカレンダー型の予定表。見出しに「10 / October / 2026」があり、以降は
+# 日のマスが数字だけの行として並ぶ(≒JOY の /schedule/ など)。数字だけでは日付と
+# 判定できないため、見出しから年月を引き継いで『2026.10.12』に組み直す。
+_MONTH_WORDS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
+_MONTH_LINE = re.compile(r"^\s*([A-Za-z]{3,9})\.?\s*$|^\s*(\d{1,2})\s*月\s*$")
+_YEAR_LINE = re.compile(r"^\s*(20\d\d)\s*年?\s*$")
+_DAY_LINE = re.compile(r"^\s*(\d{1,2})\s*$")
+_MIN_CALENDAR_RUN = 5
+
+
+def _month_of(line: str):
+    m = _MONTH_LINE.match(line)
+    if not m:
+        return None
+    if m.group(2):
+        mm = int(m.group(2))
+        return mm if 1 <= mm <= 12 else None
+    return _MONTH_WORDS.get(m.group(1).lower())
+
+
+def stitch_calendar_days(text: str) -> str:
+    """カレンダー型の予定表の、数字だけの日のマスを『YYYY.MM.DD』に書き換える。
+
+    月見出しの前後には前月・翌月への切り替え(「9」「11」など)も数字だけで並ぶので、
+    数字行をそのまま日付にはできない。月見出し以降の数字行のうち、
+    **単調増加が最も長く続くまとまり**だけを日のマスと見なす。
+    """
+    lines = text.split("\n")
+    year = None
+    sections = []  # (month, year, [数字行のindex])
+    for i, ln in enumerate(lines):
+        ym = _YEAR_LINE.match(ln)
+        if ym:
+            year = int(ym.group(1))
+            continue
+        mm = _month_of(ln)
+        if mm:
+            sections.append((mm, year, []))
+            continue
+        if sections and _DAY_LINE.match(ln):
+            sections[-1][2].append(i)
+    import datetime as _dt
+    for month, yr, idxs in sections:
+        if not yr or len(idxs) < _MIN_CALENDAR_RUN:
+            continue
+        best, run = [], []
+        for i in idxs:
+            d = int(lines[i].strip())
+            if run and d <= int(lines[run[-1]].strip()):
+                if len(run) > len(best):
+                    best = run
+                run = []
+            if 1 <= d <= 31:
+                run.append(i)
+        if len(run) > len(best):
+            best = run
+        if len(best) < _MIN_CALENDAR_RUN:
+            continue
+        for i in best:
+            d = int(lines[i].strip())
+            try:
+                _dt.date(yr, month, d)
+            except ValueError:
+                continue
+            lines[i] = f"{yr}.{month:02d}.{d:02d}"
+    return "\n".join(lines)
+
+
 _EVENT_SIGNAL = re.compile(
     r"(20\d\d[./年]|\d{1,2}\s*[/月]\s*\d{1,2}|\d{1,2}\s*:\s*\d{2}|開演|開場|OPEN|START|"
     r"チケット|ticket|発売|受付|先行|一般販売|一般発売|抽選|先着|"
@@ -1041,6 +1145,7 @@ def fetch_site_content(site_url: str):
         # 特設ページは「DATE／TIME / 2026年12月19日(土)」のように日付だけが並び、
         # 公演名はページ見出しにしか無いことがある。どのページの記述かを示す行を
         # 付けておくと、名前の無い日付のかたまりにも公演名を与えられる。
+        t = stitch_calendar_days(stitch_split_dates(t))
         title = _page_title(h)
         texts.append(f"{PAGE_MARK}{title}\n{t}" if title else t)
 
@@ -1087,8 +1192,8 @@ def has_future_dates(text: str) -> bool:
             continue
         if today <= d <= limit:
             return True
-    # 年を伴わない「11/14」「8月20日」等。年跨ぎを考え今年と翌年で判定する。
-    for m in re.finditer(r"(?<!\d)(\d{1,2})[/月](\d{1,2})日?(?!\d)", text):
+    # 年を伴わない「11/14」「8月20日」「10.05」等。年跨ぎを考え今年と翌年で判定する。
+    for m in re.finditer(r"(?<!\d)(\d{1,2})[/月.](\d{1,2})日?(?!\d)", text):
         for y in (today.year, today.year + 1):
             try:
                 d = _dt.date(y, int(m.group(1)), int(m.group(2)))

@@ -76,6 +76,51 @@ def get_auto_event_ids(idol_slug: str, prefix: str = "tt:"):
     return [r["tweet_id"] for r in (rows or [])]
 
 
+def get_auto_event_rows_by_prefix(prefix: str):
+    """tweet_id が prefix で始まる行を [{tweet_id, idol_slug, event_name}] で全件返す。
+
+    図鑑からリンクを外したグループの行(tt:/gc:/site:)は、そのグループが巡回
+    対象から消えるため run_* の再突合では掃除されず残り続ける。孤児の判定に
+    使うので、グループ横断で読む必要がある。1000行上限があるので order を
+    固定して offset を進める(order を付けないと頁の境目で重複/取り落ちが出る)。
+    """
+    out = []
+    for offset in range(0, 100000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": "tweet_id,idol_slug,event_name",
+                "tweet_id": f"like.{prefix}*",
+                "order": "tweet_id",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+    return out
+
+
+def delete_auto_events(tweet_ids):
+    """tweet_id を指定して auto_events を一括削除(件数分の往復を避ける)。"""
+    ids = [t for t in tweet_ids if t]
+    if not ids:
+        return 0
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        quoted = ",".join('"' + t.replace('"', '\\"') + '"' for t in chunk)
+        _request(
+            "DELETE",
+            "auto_events",
+            params={"tweet_id": f"in.({quoted})"},
+            headers={"Prefer": "return=minimal"},
+        )
+    return len(ids)
+
+
 def get_upcoming_counts(today: str):
     """今後(today以降)のイベント件数を idol_slug ごとに数えて返す。
 
@@ -94,6 +139,7 @@ def get_upcoming_counts(today: str):
                 "select": "idol_slug",
                 "hidden": "eq.false",
                 "event_datetime": f"gte.{today}",
+                "order": "tweet_id",
                 "limit": 1000,
                 "offset": offset,
             },
@@ -141,6 +187,7 @@ def get_last_seen_by_prefix(prefix: str):
             params={
                 "select": "account,last_tweet_id",
                 "account": f"like.{prefix}*",
+                "order": "account",
                 "limit": 1000,
                 "offset": offset,
             },

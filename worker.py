@@ -38,6 +38,7 @@ from watchlist import (
     build_site_watch_list,
     build_timetree_watch_list,
     build_watch_list,
+    site_skip_slugs,
 )
 
 COOKIES_FILE = "cookies.json"
@@ -1308,6 +1309,92 @@ def run_yahoo_rt() -> int:
     return total
 
 
+def _ttx_source_slug(tweet_id: str, idol_slug: str) -> Optional[str]:
+    """ttx 行のIDから、元になったカレンダーの持ち主 slug を取り出す。
+
+    ID は ttx:<反映先slug>:<元slug>:<イベントID>:<YYYYMMDD>。slug 自体が
+    "artist:名前" でコロンを含むので、前は反映先slug、後ろは2区切りで落とす。
+    """
+    head = f"ttx:{idol_slug}:"
+    if not tweet_id.startswith(head):
+        return None
+    body = tweet_id[len(head):]
+    parts = body.rsplit(":", 2)
+    return parts[0] if len(parts) == 3 else None
+
+
+def cleanup_orphan_rows() -> int:
+    """図鑑からリンクを外したグループの行を掃除する。
+
+    各 run_* の再突合削除は「今回巡回した slug」しか見ないため、図鑑から
+    TimeTree/Googleカレンダー/公式サイトのリンクを外すと、その slug は巡回
+    対象から消え、過去に取り込んだ行が残り続ける。誤って別グループの
+    カレンダーを登録していた場合(Appare! に appare☆ず のカレンダーなど)、
+    リンクを直しても古い予定が残ってしまうので、ここでまとめて消す。
+
+    ttx(対バンの相互反映)も、元のカレンダーが無くなったなら消す。
+    """
+    try:
+        tt_slugs = {e["idol_slug"] for e in build_timetree_watch_list()}
+        gc_slugs = {e["idol_slug"] for e in build_gcal_watch_list()}
+        site_slugs = {e["idol_slug"] for e in build_site_watch_list()} | site_skip_slugs()
+    except Exception as e:
+        print(f"孤児行の掃除: 監視対象の取得に失敗したので中止します: {e}")
+        return 0
+    # 監視対象が空(カタログ取得の失敗など)のときに全消しをしないための歯止め。
+    if not tt_slugs or not site_slugs:
+        print("孤児行の掃除: 監視対象が空なので中止します")
+        return 0
+    cal_slugs = tt_slugs | gc_slugs
+
+    doomed = []
+    for prefix, keep in (("tt:", tt_slugs), ("gc:", gc_slugs), ("site:", site_slugs)):
+        try:
+            rows = sb.get_auto_event_rows_by_prefix(prefix)
+        except Exception as e:
+            print(f"孤児行の掃除({prefix}): 読み込みに失敗: {e}")
+            continue
+        gone = [r["tweet_id"] for r in rows if r.get("idol_slug") not in keep]
+        if gone:
+            slugs = sorted({r["idol_slug"] for r in rows if r.get("idol_slug") not in keep})
+            print(f"  {prefix} 孤児 {len(gone)} 件 / {len(slugs)} グループ: {', '.join(slugs[:8])}")
+        doomed.extend(gone)
+
+    try:
+        rows = sb.get_auto_event_rows_by_prefix("ttx:")
+    except Exception as e:
+        print(f"孤児行の掃除(ttx:): 読み込みに失敗: {e}")
+        rows = []
+    gone = []
+    for r in rows:
+        src = _ttx_source_slug(r.get("tweet_id") or "", r.get("idol_slug") or "")
+        if src and src not in cal_slugs:
+            gone.append(r["tweet_id"])
+    if gone:
+        print(f"  ttx: 元カレンダーが外れた行 {len(gone)} 件")
+    doomed.extend(gone)
+
+    # 券種ラベルだけの e+ 行(「一般発売」など)。EXTRACT_VERSION を上げたので
+    # 次の巡回でも消えるが、巡回の順番待ちで残るため先に落とす。
+    try:
+        for r in sb.get_auto_event_rows_by_prefix("ep:"):
+            if eplus.is_sale_label(r.get("event_name") or ""):
+                doomed.append(r["tweet_id"])
+    except Exception as e:
+        print(f"孤児行の掃除(ep:): 読み込みに失敗: {e}")
+
+    if not doomed:
+        print("孤児行の掃除: 対象なし")
+        return 0
+    try:
+        sb.delete_auto_events(doomed)
+    except Exception as e:
+        print(f"孤児行の掃除: 削除に失敗: {e}")
+        return 0
+    print(f"孤児行の掃除: {len(doomed)} 件削除")
+    return len(doomed)
+
+
 def main() -> int:
     # X_ONLY=true は twikit(X取り込み)の動作確認用。サイト巡回/TimeTreeを飛ばしXだけ実行する。
     x_only = os.environ.get("X_ONLY", "").lower() == "true"
@@ -1323,6 +1410,7 @@ def main() -> int:
         run_gcal()
         run_eplus()
         run_yahoo_rt()
+        cleanup_orphan_rows()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())
     return 0

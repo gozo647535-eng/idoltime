@@ -229,6 +229,15 @@ def _load_site_skip():
     return {s for s in data if isinstance(s, str)}
 
 
+def site_skip_slugs():
+    """公式サイト巡回から外している slug の集合(孤児行の掃除で使う)。
+
+    巡回を外しただけのグループは、過去に取れた行を消したくないので
+    「リンクが無くなった」扱いにはしない。
+    """
+    return _load_site_skip()
+
+
 def build_site_watch_list():
     """図鑑カタログ + 有志追記から、公式サイト監視対象 [{idol_slug, name, site_url}] を作る。
     site_skip.json に挙げた slug は除外する。"""

@@ -21,7 +21,7 @@ import ticketdive  # 名前の正規化を共用
 import timetree  # イベント名の整形・プレースホルダ判定を共用
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
-EXTRACT_VERSION = "ep1"
+EXTRACT_VERSION = "ep2"  # 券種ラベルだけの公演名を落とす判定を入れたので再抽出させる
 
 SEARCH_URL = "https://eplus.jp/sf/search?keyword={q}"
 WORD_URL = "https://eplus.jp/sf/word/{wid}"
@@ -36,6 +36,11 @@ _SALE_SUFFIX = re.compile(r"\s*／.*$")
 _SALE_TOKENS = re.compile(
     r"(一般|先行|最速|二次|三次|四次|先着|学生|会員|FC|ファンクラブ|オフィシャル|チケット|当日|"
     r"プレオーダー|プレリザーブ|オフィシャル|発売|受付|抽選|申込|予約|販売|中|開始|分|[★☆\s])")
+
+
+def is_sale_label(title: str) -> bool:
+    """公演名が券種ラベルだけ(「一般発売」など)かどうか。既存行の掃除から使う。"""
+    return _is_sale_label(title)
 
 
 def _is_sale_label(title: str) -> bool:
