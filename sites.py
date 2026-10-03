@@ -723,6 +723,8 @@ _MONTH_WORDS = {
     "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
 }
 _MONTH_LINE = re.compile(r"^\s*([A-Za-z]{3,9})\.?\s*$|^\s*(\d{1,2})\s*月\s*$")
+# 「2026年10月」のように年と月が1行に入った見出し(HKT48 の予定表など)
+_YEAR_MONTH_LINE = re.compile(r"^\s*(20\d\d)\s*[年./\-]\s*(\d{1,2})\s*月?\s*$")
 _YEAR_LINE = re.compile(r"^\s*(20\d\d)\s*年?\s*$")
 _DAY_LINE = re.compile(r"^\s*(\d{1,2})\s*$")
 _MIN_CALENDAR_RUN = 5
@@ -749,6 +751,11 @@ def stitch_calendar_days(text: str) -> str:
     year = None
     sections = []  # (month, year, [数字行のindex])
     for i, ln in enumerate(lines):
+        both = _YEAR_MONTH_LINE.match(ln)
+        if both and 1 <= int(both.group(2)) <= 12:
+            year = int(both.group(1))
+            sections.append((int(both.group(2)), year, []))
+            continue
         ym = _YEAR_LINE.match(ln)
         if ym:
             year = int(ym.group(1))
