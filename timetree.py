@@ -389,9 +389,15 @@ def _cal_core(s: str) -> str:
     return ticketdive._norm_name(_CAL_DECOR.sub("", s))
 
 
+# 名前と飾りの区切りに使われる記号・空白。「zanka｜イベントカレンダー」のように
+# 飾り語を落とすと区切りだけが残るため、比較の前に落とす。
+_CAL_SQUASH = re.compile(r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]")
+
+
 def calendar_belongs_to(group_name: str, cal_title: str) -> bool:
     """カレンダー名がそのグループのものと言えるか(飾りを除いて完全一致)。"""
     if not cal_title or _CAL_REJECT.search(cal_title):
         return False
-    nm, ct = _cal_core(group_name), _cal_core(cal_title)
+    nm = _CAL_SQUASH.sub("", _cal_core(group_name))
+    ct = _CAL_SQUASH.sub("", _cal_core(cal_title))
     return bool(nm) and len(nm) >= 3 and nm == ct
