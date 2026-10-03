@@ -345,7 +345,7 @@ def fetch_public_events(alias: str):
 # カレンダーを取り込んでしまう(Appare! に appare☆ず のカレンダーが入っていた)。
 # カレンダー名から定型の飾りを落として、グループ名と一致するものだけ通す。
 _CAL_DECOR = re.compile(
-    r"(公式|オフィシャル|official|スケジュール|schedule|カレンダー|calendar|ライブ|live|"
+    r"(公式|オフィシャル|official|公開|スケジュール|schedule|カレンダー|calendar|ライブ|live|"
     r"イベント|event|情報|予定|日程|お知らせ|info|フォロー|更新|最新)", re.IGNORECASE)
 _CAL_REJECT = re.compile(r"(非公式|unofficial|ファン|fan\b|個人|私用|勉強|仕事|バイト)", re.IGNORECASE)
 
