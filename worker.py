@@ -794,12 +794,14 @@ def merge_site_events(jsonld_events, gemini_events):
 # 1回のフル実行で巡回する公式サイト数の上限。1サイトあたり約36秒(描画とサブページ
 # 取得を含む)なので、登録サイトが増えても実行時間が一定になるようにする。
 SITE_BATCH = int(os.environ.get("SITE_BATCH", "65"))
+# LLMが連続でこの回数使えなければ、その回の公式サイト巡回は打ち切る
+LLM_DEAD_LIMIT = int(os.environ.get("LLM_DEAD_LIMIT", "8"))
 # TimeTree も同様。1カレンダーはAPI1回だが、各イベントの TicketDive 補完に
 # 通信が入るため件数に比例して伸びる。
 TT_BATCH = int(os.environ.get("TT_BATCH", "45"))
 
 
-def _rotate(watch, today: str, key_prefix: str, batch: int, label: str):
+def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: bool = True):
     """巡回対象を上限 batch 件に絞る。登録数が増えても実行時間を一定に保つ。
 
     順番は ① 今後のイベントが少ないグループ ② 最後に巡回した日が古いグループ。
@@ -823,10 +825,14 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str):
                        last_by_key.get(f"{key_prefix}:{e['idol_slug']}") or ""),
     )
     picked = ranked[:batch]
-    try:
-        sb.set_last_seen_many([(f"{key_prefix}:{e['idol_slug']}", today) for e in picked])
-    except Exception as e2:
-        print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e2}")
+    # record=False のときは呼び出し側が「実際に処理できたグループ」だけを記録する
+    # (枠切れで抽出できなかったグループまで巡回済みにすると、次の順番が一巡後に
+    # なってしまい、いつまでも取り込めない)
+    if record:
+        try:
+            sb.set_last_seen_many([(f"{key_prefix}:{e['idol_slug']}", today) for e in picked])
+        except Exception as e2:
+            print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e2}")
     thin = sum(1 for e in picked if counts.get(e["idol_slug"], 0) < 3)
     print(f"  今回の{label}巡回は {len(picked)} / {len(watch)} 件"
           f"(今後3件未満のグループ {thin} 件を優先・残りは次回)")
@@ -853,8 +859,11 @@ def run_sites() -> int:
             print(f"  公式サイトリンクが無く巡回できない slug: {', '.join(sorted(missing))}")
     else:
         watch = _rotate(watch, datetime.datetime.now(JST).strftime("%Y-%m-%d"),
-                        "sq", SITE_BATCH, "公式サイト")
+                        "sq", SITE_BATCH, "公式サイト", record=False)
     total = 0
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    processed = []   # 巡回日を記録するグループ(枠切れで抽出できなかった分は入れない)
+    dead = 0         # LLMが連続して使えなかった回数
     for entry in watch:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
         print(f"{name} の公式サイトを確認: {url}")
@@ -862,8 +871,10 @@ def run_sites() -> int:
             content_hash, combined, jsonld_events = sites.fetch_site_content(url)
         except Exception as e:
             print(f"  失敗: {e}")
+            processed.append(slug)
             continue
         if content_hash is None:
+            processed.append(slug)
             continue
         state_key = f"site:{slug}"
         # 本文/構造化データに変化が無ければ LLM を呼ばずにスキップ(無料枠の節約)。
@@ -872,6 +883,7 @@ def run_sites() -> int:
         seen = sb.get_last_seen(state_key)
         if seen == content_hash:
             print("  変更なし。スキップ")
+            processed.append(slug)
             continue
         retry_zero = seen == f"{content_hash}|z1"
         if retry_zero:
@@ -883,7 +895,15 @@ def run_sites() -> int:
         if not llm_ok and not jsonld_events:
             # LLMが一時失敗(枠切れ等)、かつJSON-LDも無し → 状態を更新せず次回再試行
             print("  抽出できず(次回再試行)")
+            dead += 1
+            if dead >= LLM_DEAD_LIMIT:
+                # その日の無料枠が尽きた後は、取得(JS描画を含む)に数分かけても
+                # 何も取り込めない。残りは次回に回して実行時間を節約する。
+                rest = len(watch) - len(processed) - dead
+                print(f"  LLMの無料枠が尽きたため、残り {max(rest, 0)} 件は次回に回します")
+                break
             continue
+        dead = 0
 
         merged = merge_site_events(jsonld_events, llm_events)
         count = 0
@@ -920,8 +940,16 @@ def run_sites() -> int:
             # LLM一時失敗: JSON-LD分だけ即反映。削除・状態更新はせず次回再試行する
             # (既存のLLM由来イベントを枠切れで消さないため、reconcileとhash更新は行わない)
             print(f"  {count} 件反映(JSON-LDのみ / LLM次回再試行)")
+            dead += 1
         total += count
-    print(f"公式サイト取り込み完了: 合計 {total} 件")
+        if llm_ok:
+            processed.append(slug)
+    if processed and not os.environ.get("SITE_SLUGS", "").strip():
+        try:
+            sb.set_last_seen_many([(f"sq:{s2}", today) for s2 in processed])
+        except Exception as e:
+            print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e}")
+    print(f"公式サイト取り込み完了: 合計 {total} 件 / 巡回できた {len(processed)} 件")
     return total
 
 
