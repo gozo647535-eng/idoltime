@@ -1357,6 +1357,14 @@ def cleanup_orphan_rows() -> int:
         print("孤児行の掃除: 監視対象が空なので中止します")
         return 0
     cal_slugs = tt_slugs | gc_slugs
+    try:
+        known = {i["idol_slug"] for i in build_idol_name_list()}
+    except Exception as e:
+        print(f"孤児行の掃除: 登録グループ一覧の取得に失敗したので中止します: {e}")
+        return 0
+    if not known:
+        print("孤児行の掃除: 登録グループ一覧が空なので中止します")
+        return 0
 
     doomed = []
     for prefix, keep in (("tt:", tt_slugs), ("gc:", gc_slugs), ("site:", site_slugs)):
@@ -1379,7 +1387,10 @@ def cleanup_orphan_rows() -> int:
     gone = []
     for r in rows:
         src = _ttx_source_slug(r.get("tweet_id") or "", r.get("idol_slug") or "")
-        if src and src not in cal_slugs:
+        # 古い版が作った ttx 行は、元が公式サイトやチケットサイト発見のときもあり
+        # IDから slug を取り出せない。確実に「カレンダーの持ち主だった slug」と
+        # 読めるものだけを消し、読めない行は開催日が過ぎたときの掃除に任せる。
+        if src and src in known and src not in cal_slugs:
             gone.append(r["tweet_id"])
     if gone:
         print(f"  ttx: 元カレンダーが外れた行 {len(gone)} 件")
