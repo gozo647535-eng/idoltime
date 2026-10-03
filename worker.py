@@ -898,13 +898,9 @@ def run_sites() -> int:
             continue
         if not _site_mentions_group(name, combined):
             # 登録URLがそのグループのサイトでない(ドメインが別の用途に使われている等)。
-            # LLMの無料枠を無駄に使わないよう抽出せず、ハッシュだけ記録して次回は飛ばす
-            # (サイトの内容が変われば再び確認される)。
+            # LLMの無料枠を使わないよう抽出しない。状態は書かないので、URLを直せば
+            # 次の巡回でそのまま取り込まれ、直っていなければ毎回ログに出て気づける。
             print(f"  サイト内にグループ名が出てきません。登録URLの見直しが必要です: {url}")
-            try:
-                sb.set_last_seen(f"site:{slug}", content_hash)
-            except Exception as e:
-                print(f"  状態の記録に失敗: {e}")
             processed.append(slug)
             continue
         state_key = f"site:{slug}"
