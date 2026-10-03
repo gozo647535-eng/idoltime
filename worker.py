@@ -839,6 +839,26 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: 
     return picked
 
 
+def _site_mentions_group(name: str, text: str) -> bool:
+    """サイト本文にグループ名が出てくるか。
+
+    図鑑に登録した公式サイトURLが、そのグループと無関係なサイトになっていること
+    がある(ドメインが手放されて別の用途で使われている等。MiX BeRRY の mixberry.jp は
+    中国ドラマのブログになっていた)。名前がどこにも出てこないサイトから予定を
+    取り出そうとしても無駄なので、先に弾く。
+    """
+    light = lineup._light(name)
+    if len(light) < lineup.MIN_NAME_LEN:
+        return True   # 短い名前は偶然の一致・不一致が多いので判定しない
+    hay = lineup._light(text)
+    if light in hay:
+        return True
+    # 「MiX BeRRY」↔「mixberry」のように、空白や記号の有無だけが違う表記も同じと見る
+    squash = re.sub(r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]", "", light)
+    return len(squash) >= lineup.MIN_NAME_LEN and squash in re.sub(
+        r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]", "", hay)
+
+
 def run_sites() -> int:
     """公式サイトを巡回してイベント/チケット情報を取り込む(主軸)。
     JSON-LD(schema.org Event)を Gemini不要で抽出し、Gemini解析結果と統合する。"""
@@ -874,6 +894,17 @@ def run_sites() -> int:
             processed.append(slug)
             continue
         if content_hash is None:
+            processed.append(slug)
+            continue
+        if not _site_mentions_group(name, combined):
+            # 登録URLがそのグループのサイトでない(ドメインが別の用途に使われている等)。
+            # LLMの無料枠を無駄に使わないよう抽出せず、ハッシュだけ記録して次回は飛ばす
+            # (サイトの内容が変われば再び確認される)。
+            print(f"  サイト内にグループ名が出てきません。登録URLの見直しが必要です: {url}")
+            try:
+                sb.set_last_seen(f"site:{slug}", content_hash)
+            except Exception as e:
+                print(f"  状態の記録に失敗: {e}")
             processed.append(slug)
             continue
         state_key = f"site:{slug}"
