@@ -719,6 +719,9 @@ def run_gcal() -> int:
         sb.set_last_seen(state_key, content_hash)
         print(f"  {len(rows)} 件反映 / {removed} 件削除")
         total += len(rows)
+    if tt_shrunk:
+        print("⚠ 反映より削除が多かったグループ: "
+              + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in tt_shrunk))
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"Googleカレンダー取り込み完了: 合計 {total} 件 / "
           f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
@@ -1007,6 +1010,7 @@ def run_sites() -> int:
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     processed = []   # 巡回日を記録するグループ(枠切れで抽出できなかった分は入れない)
     found_cal = 0    # 公式サイトから見つけた公開カレンダーの数
+    shrunk = []      # 反映より削除が多かったグループ(退行の早期発見用)
     try:
         # すでにカレンダーがあるグループは探さない(カレンダー名の確認で毎回
         # 取得が入るため)。自動発見済みの分もこの一覧に入っている。
@@ -1121,6 +1125,8 @@ def run_sites() -> int:
                 else:
                     sb.set_last_seen(state_key, content_hash)
                     print(f"  {count} 件反映 / {removed} 件削除")
+                    if removed > count:
+                        shrunk.append((name, count, removed))
         else:
             # LLM一時失敗: JSON-LD分だけ即反映。削除・状態更新はせず次回再試行する
             # (既存のLLM由来イベントを枠切れで消さないため、reconcileとhash更新は行わない)
@@ -1136,6 +1142,11 @@ def run_sites() -> int:
             print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e}")
     print(f"公式サイト取り込み完了: 合計 {total} 件 / 巡回できた {len(processed)} 件"
           + (f" / 公開カレンダーを {found_cal} 件発見" if found_cal else ""))
+    if shrunk:
+        # 抽出の退行は「反映より削除が多い」形で現れる(いぎなり東北産が13→2件に
+        # なった事故がこれ)。見落とさないよう、最後にまとめて出す。
+        print("⚠ 反映より削除が多かったグループ: "
+              + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in shrunk))
     return total
 
 
@@ -1222,6 +1233,7 @@ def run_timetree() -> int:
     total = 0
     fanout = 0
     fanout_slugs = set()
+    tt_shrunk = []   # 反映より削除が多かったグループ(退行の早期発見用)
     for entry in watch:
         slug, name, tt_url = entry["idol_slug"], entry["name"], entry["tt_url"]
         alias = timetree.extract_alias(tt_url)
@@ -1273,6 +1285,8 @@ def run_timetree() -> int:
             print(f"  再突合(削除)でエラー: {e}")
         sb.set_last_seen(state_key, content_hash)
         print(f"  {count} 件反映 / {removed} 件削除")
+        if removed > count:
+            tt_shrunk.append((name, count, removed))
         total += count
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"TimeTree 取り込み完了: 合計 {total} 件 / "
