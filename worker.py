@@ -1117,9 +1117,11 @@ def _fanout_lineup(row: dict, lineup_idx, today: str, touched: set) -> int:
     """
     date = (row.get("event_datetime") or "")[:10]
     tid = row.get("tweet_id", "")
-    # tt(TimeTree) と gc(Googleカレンダー)の行を相互反映の対象にする。
+    # tt(TimeTree)・gc(Googleカレンダー)・site(公式サイト)の行を相互反映の対象にする。
+    # 公式サイト由来の行は出演者欄を持たないが、公演名そのものに他グループの名前が
+    # 入ることがある(「POEM・poemちゃん健康促進無料配信ライブ」など)。
     # ttx 自体をさらに展開しないよう、接頭辞を限定する。
-    prefix = next((p for p in ("tt:", "gc:") if tid.startswith(p)), None)
+    prefix = next((p for p in ("tt:", "gc:", "site:") if tid.startswith(p)), None)
     if not date or date < today or not prefix:
         return 0
     text = f"{row.get('event_name') or ''}\n{row.get('raw_text') or ''}"
@@ -1612,7 +1614,9 @@ def cleanup_orphan_rows() -> int:
     if not tt_slugs or not site_slugs:
         print("孤児行の掃除: 監視対象が空なので中止します")
         return 0
-    cal_slugs = tt_slugs | gc_slugs
+    # ttx(相互反映)の元になり得るのは tt / gc / site の行なので、どれかに
+    # 残っていれば孤児ではない。
+    cal_slugs = tt_slugs | gc_slugs | site_slugs
     try:
         known = {i["idol_slug"] for i in build_idol_name_list()}
     except Exception as e:
