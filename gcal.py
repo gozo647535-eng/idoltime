@@ -16,7 +16,7 @@ import urllib.request
 import timetree  # イベント名の整形・メモからのチケットURL抽出を共用
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
-EXTRACT_VERSION = "gc1"
+EXTRACT_VERSION = "gc2"  # 予定ごとにカレンダーの当日ビューURLを持たせたので再取り込み
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
@@ -56,6 +56,14 @@ def _decoded_id(v: str):
     except Exception:
         pass
     return v
+
+
+def day_view_url(cal_id: str, day) -> str:
+    """公開カレンダーの、その日の予定一覧を開くURL。"""
+    src = urllib.parse.quote(str(cal_id), safe="")
+    ymd = str(day).replace("-", "")
+    return (f"https://calendar.google.com/calendar/embed?src={src}"
+            f"&ctz=Asia%2FTokyo&mode=AGENDA&dates={ymd}%2F{ymd}")
 
 
 def ics_url(cal_id: str) -> str:
@@ -187,5 +195,7 @@ def _build(fields: dict, cal_id: str, today):
         "venue": location,
         "ticket_url": ticket_url,
         "note": note or None,
-        "page_url": None,
+        # その日を開いたカレンダーのURL。チケットURLが無い予定は、アプリから
+        # ここへ案内する(カレンダー全体を開くより、その日が見えるほうがよい)。
+        "page_url": day_view_url(cal_id, day),
     }
