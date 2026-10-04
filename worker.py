@@ -896,11 +896,15 @@ def _site_mentions_group(name: str, text: str) -> bool:
     取り出そうとしても無駄なので、先に弾く。
     """
     light = lineup._light(name)
+    # 図鑑の名前に付けている補足(「PassCode(Band Set)」の括弧など)はサイトには
+    # 書かれていないので、括弧を外した名前でも見る。
+    base = lineup._light(re.sub(r"[（(\[［].{0,20}?[）)\]］]", "", name)).strip()
     if len(light) < lineup.MIN_NAME_LEN:
         return True   # 短い名前は偶然の一致・不一致が多いので判定しない
     hay = lineup._light(text)
-    if light in hay:
+    if light in hay or (len(base) >= lineup.MIN_NAME_LEN and base in hay):
         return True
+    light = base if len(base) >= lineup.MIN_NAME_LEN else light
     # 「MiX BeRRY」↔「mixberry」のように、空白や記号の有無だけが違う表記も同じと見る
     squash = re.sub(r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]", "", light)
     return len(squash) >= lineup.MIN_NAME_LEN and squash in re.sub(

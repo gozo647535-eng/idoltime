@@ -358,6 +358,9 @@ def _html_to_text(html: str) -> str:
 
 PAGE_MARK = "【ページ】"
 
+# 凝縮後の素材に日付がいくつ残ったかを数えるためのパターン(ログ用)
+_DATE_IN_TEXT = re.compile(r"20\d\d[./\-]\d{1,2}[./\-]\d{1,2}")
+
 
 def _page_title(html: str) -> str:
     """ページの見出し(h1 → og:title → title)。公演名として使えることがある。"""
@@ -807,7 +810,9 @@ _CONDENSE_NOISE = re.compile(
     r"(WALLPAPER|壁紙|お絵かき|伝言板|セットリスト|SETLIST|メンバー紹介|プロフィール|"
     r"ディスコグラ|DISCOGRAPHY|MAGAZINE|GOODS|グッズ|通販|抽選結果|会員|ファンクラブ|"
     # TV・ラジオ・雑誌等の露出はプロンプトでも抽出対象外。字数を食うだけなので先に落とす
-    r"^TV$|テレビ|ラジオ|RADIO|放送|番組|雑誌|配信中|公開中)",
+    r"^TV$|テレビ|ラジオ|RADIO|放送|番組|雑誌|配信中|公開中|"
+    # 劇場の休館・休演は予定ではないが、カレンダーでは毎日並ぶので字数を食う
+    r"休館|休演|定休)",
     re.IGNORECASE)
 
 
@@ -817,6 +822,10 @@ _CONDENSE_NOISE = re.compile(
 _REAL_DATE_LINE = re.compile(
     r"(\d{4}\s*[./年]\s*\d{1,2}\s*[./月]\s*\d{1,2}|open\s*\d|start\s*\d|開場|開演)",
     re.IGNORECASE)
+
+# カレンダーの日付のマス(日付だけの行)と、曜日だけの行
+_PURE_DATE_LINE = re.compile(r"^\s*20\d\d[./\-]\d{1,2}[./\-]\d{1,2}\s*$")
+_WEEKDAY_LINE = re.compile(r"^\s*[（(]?[月火水木金土日]([・/][月火水木金土日])*[）)]?\s*$")
 
 _RECEPTION_LINE = re.compile(
     r"(先行受付|先行発売|一般発売|プレイガイド|抽選申込|二次先行|チケット発売|受付中|受付開始|発売中)")
@@ -836,6 +845,19 @@ def _condense_for_llm(text: str, limit: int = 2200) -> str:
     page_marks = [i for i, ln in enumerate(lines) if ln.startswith(PAGE_MARK)]
     blocks = []
     for i, ln in enumerate(lines):
+        # カレンダー形式の予定表は、日付のマスの下にその日の予定が数行続く。
+        # 前後1行だけを見ると日付と曜日しか残らず、肝心の公演名(3〜4行下)が
+        # 落ちる(HKT48 は31日分すべてが「劇場 休館日」だけになっていた)。
+        # 次の日付行までを、その日のひとかたまりとして扱う。
+        if _PURE_DATE_LINE.match(ln):
+            end, j = i + 1, i + 1
+            while j < len(lines) and j <= i + 7 and not _PURE_DATE_LINE.match(lines[j]):
+                end, j = j + 1, j + 1
+            day = [k for k in range(i, end)
+                   if not _CONDENSE_NOISE.search(lines[k]) and not _WEEKDAY_LINE.match(lines[k])]
+            if len(day) > 1:   # 日付だけで中身が無い日は入れない
+                blocks.append(day)
+            continue
         if not _EVENT_SIGNAL.search(ln) or ln.startswith(PAGE_MARK):
             continue
         block = range(max(0, i - 1), min(len(lines), i + 2))
@@ -1254,6 +1276,13 @@ def fetch_site_content(site_url: str):
     combined = "\n\n".join(texts)
     # PROMPT_VERSION と JSON-LD署名を含めることで、本文/構造化データが変わると再抽出が走る。
     # JS描画で本文が変われば content_hash も変わるため、既読SPAサイトも自動で再抽出される。
+    # どのページを材料にしたか / 凝縮後に日付がいくつ残るかは、0件だったときの
+    # 切り分けに必要(ページは取れているのか、日付が落ちているのかが分かる)。
+    heads = [ln[len(PAGE_MARK):][:28] for ln in combined.split("\n") if ln.startswith(PAGE_MARK)]
+    cond = _condense_for_llm(combined)
+    print(f"    素材 {len(texts)} ページ / 本文 {len(combined)} 字 → 凝縮 {len(cond)} 字 / "
+          f"日付 {len(_DATE_IN_TEXT.findall(cond))} 件"
+          + (f" / ページ: {' | '.join(heads[:4])}" if heads else ""))
     ld_sig = "|".join(f"{e.event_name}@{e.event_datetime}" for e in jsonld_events)
     content_hash = hashlib.sha1(
         (PROMPT_VERSION + "\n" + combined + "\n" + ld_sig).encode("utf-8", "ignore")
