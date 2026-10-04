@@ -699,6 +699,7 @@ def run_gcal() -> int:
     total = 0
     fanout = 0
     fanout_slugs = set()
+    gc_shrunk = []   # 反映より削除が多かったグループ(退行の早期発見用)
     for entry in watch:
         slug, name, gc_url = entry["idol_slug"], entry["name"], entry["gc_url"]
         cal_id = gcal.extract_calendar_id(gc_url)
@@ -745,10 +746,12 @@ def run_gcal() -> int:
             print(f"  再突合(削除)でエラー: {e}")
         sb.set_last_seen(state_key, content_hash)
         print(f"  {len(rows)} 件反映 / {removed} 件削除")
+        if removed > len(rows):
+            gc_shrunk.append((name, len(rows), removed))
         total += len(rows)
-    if tt_shrunk:
+    if gc_shrunk:
         print("⚠ 反映より削除が多かったグループ: "
-              + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in tt_shrunk))
+              + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in gc_shrunk))
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"Googleカレンダー取り込み完了: 合計 {total} 件 / "
           f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
@@ -1315,6 +1318,9 @@ def run_timetree() -> int:
         if removed > count:
             tt_shrunk.append((name, count, removed))
         total += count
+    if tt_shrunk:
+        print("⚠ 反映より削除が多かったグループ: "
+              + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in tt_shrunk))
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"TimeTree 取り込み完了: 合計 {total} 件 / "
           f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
