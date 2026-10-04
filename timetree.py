@@ -32,7 +32,7 @@ JST = datetime.timezone(datetime.timedelta(hours=9))
 # メモ抽出ロジックを変えたらこの値を上げる(既読カレンダーの再処理をトリガー)
 # v3: TicketDive 構造化データによる補完を追加
 # v5: メモから開場/入場時刻(open_time/entry_time)を抽出
-EXTRACT_VERSION = "v5"
+EXTRACT_VERSION = "v6"  # 会場欄が空の予定はメモから会場名を拾うようにしたので再取り込み
 
 # チケット関連のメモか判定するキーワード
 _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", "販売", "先着")

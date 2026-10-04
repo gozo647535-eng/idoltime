@@ -30,7 +30,8 @@ import sites  # 公式サイトからの取得エンジン(主軸)
 import eplus  # イープラス(e+)からの取得エンジン
 import gcal  # Google 公開カレンダー(ICS)からの取得エンジン
 import lineup  # 出演欄から図鑑の登録グループを突合
-import timetree  # TimeTree 公開カレンダーからの取得エンジン
+import timetree
+import venuetext  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
 import ticketsite  # LivePocket / TiGET イベントページの構造化パーサ
 import yahoo_rt  # Yahoo!リアルタイム検索からのチケットサイト・イベント発見
@@ -201,6 +202,19 @@ def clean_venue(v: Optional[str]) -> Optional[str]:
     v = re.sub(r"\s+", " ", v).strip()
     v = re.sub(r"^(?:会場|場所|at|＠|@)\s*[:：]?\s*", "", v, flags=re.IGNORECASE)
     return v.strip() or None
+
+
+def venue_of(ev: dict) -> Optional[str]:
+    """予定の会場名。会場欄が空ならメモから拾う。
+
+    TimeTree・Googleカレンダーの会場欄(location)は空のことが多く(実測で
+    TimeTree 52%・Googleカレンダー 90%)、代わりにメモへ「会場：〇〇」「📍〇〇」と
+    書かれている。会場名が無いと都道府県での絞り込みも会場ページも働かないので拾う。
+    """
+    v = clean_venue(ev.get("venue"))
+    if v:
+        return v
+    return clean_venue(venuetext.venue_from_note(ev.get("note"), ev.get("title")))
 
 
 def parse_ticket_info_fallback(text: str, urls: Optional[List[str]] = None) -> dict:
@@ -663,7 +677,7 @@ def build_gcal_row(slug: str, name: str, gc_url: str, ev: dict) -> Optional[dict
         "ticket_url": ev.get("ticket_url"),
         "ticket_types": [],
         "max_tickets": None,
-        "other_details": clean_venue(ev.get("venue")),
+        "other_details": venue_of(ev),
         "raw_text": ev.get("note") or None,
         "tweet_url": ev.get("page_url") or gc_url,
     }
@@ -763,7 +777,7 @@ def build_eplus_row(slug: str, name: str, page_url: str, ev: dict) -> Optional[d
         "ticket_url": ev.get("ticket_url"),
         "ticket_types": [],
         "max_tickets": None,
-        "other_details": clean_venue(ev.get("venue")),
+        "other_details": venue_of(ev),
         "raw_text": None,
         "tweet_url": ev.get("page_url") or page_url,
     }
@@ -1182,7 +1196,7 @@ def build_timetree_row(slug: str, name: str, tt_url: str, ev: dict) -> Optional[
         "ticket_url": ev.get("ticket_url"),
         "ticket_types": [],
         "max_tickets": None,
-        "other_details": clean_venue(ev.get("venue")),
+        "other_details": venue_of(ev),
         "raw_text": ev.get("note") or None,
         "tweet_url": ev.get("page_url") or tt_url,
     }
