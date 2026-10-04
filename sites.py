@@ -30,7 +30,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v21"
+PROMPT_VERSION = "v22"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -831,6 +831,8 @@ _CONDENSE_NOISE = re.compile(
     r"ディスコグラ|DISCOGRAPHY|MAGAZINE|GOODS|グッズ|通販|抽選結果|会員|ファンクラブ|"
     # TV・ラジオ・雑誌等の露出はプロンプトでも抽出対象外。字数を食うだけなので先に落とす
     r"^TV$|テレビ|ラジオ|RADIO|放送|番組|雑誌|配信中|公開中|"
+    # 新譜・主題歌・動画の告知。日付が付いて並ぶので予定表と競合して字数を食う
+    r"RELEASE|リリース決定|主題歌|配信リリース|MV|YOUTUBE|VIEW MORE|"
     # 劇場の休館・休演は予定ではないが、カレンダーでは毎日並ぶので字数を食う
     r"休館|休演|定休)",
     re.IGNORECASE)
@@ -846,6 +848,11 @@ _REAL_DATE_LINE = re.compile(
 # カレンダーの日付のマス(日付だけの行)と、曜日だけの行
 _PURE_DATE_LINE = re.compile(r"^\s*20\d\d[./\-]\d{1,2}[./\-]\d{1,2}\s*$")
 _WEEKDAY_LINE = re.compile(r"^\s*[（(]?[月火水木金土日]([・/][月火水木金土日])*[）)]?\s*$")
+
+# 予定表のページを見分ける見出し(【ページ】行に対して使う)
+_SCHEDULE_PAGE_RE = re.compile(
+    r"(schedule|スケジュール|calendar|カレンダー|予定|日程|公演|ライブ|live|出演|event|tour|ツアー)",
+    re.IGNORECASE)
 
 _RECEPTION_LINE = re.compile(
     r"(先行受付|先行発売|一般発売|プレイガイド|抽選申込|二次先行|チケット発売|受付中|受付開始|発売中)")
@@ -889,6 +896,20 @@ def _condense_for_llm(text: str, limit: int = 2200) -> str:
     if len(blocks) < 2:
         return text[:limit]
 
+    # どのページのかたまりかを覚えておく。予定表のページを先に入れたい
+    # (トップページの新着やチケット受付に字数を食われ、肝心の /schedule の
+    #  中身が1行も入らないことがあった)。
+    page_of = {}
+    cur_page = -1
+    for i, ln in enumerate(lines):
+        if ln.startswith(PAGE_MARK):
+            cur_page = i
+        page_of[i] = cur_page
+
+    def _on_schedule_page(b) -> bool:
+        h = page_of.get(min(b), -1)
+        return h >= 0 and bool(_SCHEDULE_PAGE_RE.search(lines[h]))
+
     picked, used = set(page_marks), 0  # ページ見出しは必ず残す(数行で安い)
 
     def take(block):
@@ -905,14 +926,18 @@ def _condense_for_llm(text: str, limit: int = 2200) -> str:
                 and not any(_REAL_DATE_LINE.search(lines[i]) for i in b))
 
     future = [b for b in blocks if any(has_future_dates(lines[i]) for i in b)]
-    # ① 今後の日付を含み、受付告知ではないかたまり(=実際の公演)を最優先で入れる
+    # ① 予定表ページの、今後の日付を含む公演のかたまりを最優先で入れる
+    for b in future:
+        if not _is_reception(b) and _on_schedule_page(b):
+            take(b)
+    # ② 次に他のページ(トップの新着など)の公演のかたまり
     for b in future:
         if not _is_reception(b):
             take(b)
-    # ② 次に受付告知(sale_datetime の材料になる)
+    # ③ 次に受付告知(sale_datetime の材料になる)
     for b in future:
         take(b)
-    # ③ 余力で残りのイベント行
+    # ④ 余力で残りのイベント行
     for b in blocks:
         take(b)
     return "\n".join(lines[i] for i in sorted(picked))
