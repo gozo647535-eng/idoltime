@@ -18,6 +18,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import asyncio
 import datetime
 import hashlib
+import json
 import re
 import traceback
 import urllib.parse
@@ -1640,6 +1641,109 @@ def run_yahoo_rt(discover_sites: bool = True) -> int:
     return total
 
 
+CURATED_FILE = "curated_events.json"
+
+
+def run_curated() -> int:
+    """curated_events.json に手で書いたイベントを取り込む。
+
+    公式サイトがJS描画や特殊な作りで、LLMでは何度やっても取れないグループがある
+    (KiiiKiii・GILTY x GILTY・Panic Monster !n Wonderland など)。そうした分を
+    人が書いて足せる経路。ファイルから消せばその行も消える(slug単位で再突合)。
+
+    1行の形:
+      {"idol_slug": "artist:KiiiKiii", "event_name": "...",
+       "event_datetime": "2026-10-12 18:00", "venue": "...",
+       "sale_datetime": "2026-09-01 10:00", "is_first_come": false,
+       "ticket_url": "https://...", "source_url": "https://...", "note": "..."}
+    event_datetime 以外は省略可。
+    """
+    try:
+        with open(CURATED_FILE, encoding="utf-8") as f:
+            entries = json.load(f)
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        print(f"{CURATED_FILE} の読み込みに失敗: {e}")
+        return 0
+    if not isinstance(entries, list) or not entries:
+        return 0
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    try:
+        known = {i["idol_slug"] for i in build_idol_name_list()}
+    except Exception as e:
+        print(f"手入力イベント: 登録グループ一覧の取得に失敗したので中止します: {e}")
+        return 0
+
+    rows_by_slug = {}
+    skipped = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        slug = (e.get("idol_slug") or "").strip()
+        name = (e.get("event_name") or "").strip()
+        when = normalize_event_datetime((e.get("event_datetime") or "").strip())
+        if not slug or not name or not when:
+            print(f"  形が足りない行を飛ばします: {str(e)[:60]}")
+            continue
+        if slug not in known:
+            print(f"  図鑑に無い slug を飛ばします: {slug}")
+            continue
+        if when[:10] < today:
+            skipped += 1
+            continue
+        key = hashlib.sha1(f"{slug}|{name}|{when}".encode("utf-8")).hexdigest()[:20]
+        sale = e.get("sale_datetime")
+        row = {
+            "tweet_id": f"cur:{slug}:{key}",
+            "idol_slug": slug,
+            "account": None,
+            "event_name": name,
+            "event_datetime": when,
+            "open_time": e.get("open_time"),
+            "entry_time": e.get("entry_time"),
+            "sale_datetime": to_timestamptz(normalize_datetime_string(sale) or sale) if sale else None,
+            "is_first_come": bool(e.get("is_first_come")),
+            "ticket_url": e.get("ticket_url"),
+            "ticket_types": e.get("ticket_types") or [],
+            "max_tickets": None,
+            "other_details": clean_venue(e.get("venue")),
+            "raw_text": e.get("note") or None,
+            "tweet_url": e.get("source_url") or e.get("ticket_url"),
+        }
+        rows_by_slug.setdefault(slug, []).append(row)
+
+    total = 0
+    for slug, rows in rows_by_slug.items():
+        try:
+            sb.upsert_auto_events(rows)
+        except Exception as e:
+            print(f"  {slug}: 書き込み失敗({len(rows)}件): {e}")
+            continue
+        total += len(rows)
+        # ファイルから消した行は消す(このグループの cur: 行を再突合)
+        emitted = {r["tweet_id"] for r in rows}
+        removed = 0
+        try:
+            for old_id in sb.get_auto_event_ids(slug, prefix=f"cur:{slug}:"):
+                if old_id not in emitted:
+                    sb.delete_auto_event(old_id)
+                    removed += 1
+        except Exception as e:
+            print(f"  {slug}: 再突合でエラー: {e}")
+        print(f"  {slug}: {len(rows)} 件反映 / {removed} 件削除")
+    # ファイルから全部消したグループの行も消す
+    try:
+        for r in sb.get_auto_event_rows_by_prefix("cur:"):
+            if r.get("idol_slug") not in rows_by_slug:
+                sb.delete_auto_event(r["tweet_id"])
+    except Exception as e:
+        print(f"  不要になった手入力行の掃除でエラー: {e}")
+    print(f"手入力イベント取り込み完了: 合計 {total} 件"
+          + (f" / 終了済み {skipped} 件は対象外" if skipped else ""))
+    return total
+
+
 def _ttx_source_slug(tweet_id: str, idol_slug: str) -> Optional[str]:
     """ttx 行のIDから、元になったカレンダーの持ち主 slug を取り出す。
 
@@ -1763,6 +1867,7 @@ def main() -> int:
         run_timetree()
         run_gcal()
         run_eplus()
+        run_curated()
         run_yahoo_rt()
         cleanup_orphan_rows()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
