@@ -7,6 +7,7 @@ Xより壊れにくく、認証も不要。標準ライブラリ + bs4 + google-
 import gzip
 import re
 import time
+import urllib.parse
 import urllib.request
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
@@ -1118,6 +1119,59 @@ _CALENDAR_LINK_RE = re.compile(
     re.IGNORECASE)
 
 
+# サイトの各予定に付いている「Googleカレンダーに追加」リンク。URL に公演名と
+# 日時がそのまま入っているので、LLM を使わずに予定を取り出せる
+# (ハロー！プロジェクトの各グループのページがこの作りになっている)。
+_TEMPLATE_LINK_RE = re.compile(
+    r"https?://(?:www\.)?calendar\.google\.com/calendar/[^\"'\s<>]*action=TEMPLATE[^\"'\s<>]*",
+    re.IGNORECASE)
+# TV・ラジオ・配信・雑誌などの露出は予定として扱わない(抽出プロンプトと同じ方針)
+_MEDIA_TITLE_RE = re.compile(
+    r"(ラジオ|radio|テレビ|ＴＶ|\bTV\b|放送|番組|YouTube|配信|生放送|ニコ生|SHOWROOM|"
+    r"雑誌|連載|掲載|発売日|オンエア|on\s*air|FM|チャン[「『])", re.IGNORECASE)
+# 放送局の略称+番組名(「MBS「西乃風ブラン堂」」など)。グループ名が英字のワンマン
+# 公演(「PIGGS「FINAL LIVE」」)を巻き込まないよう、局名は決め打ちで並べる。
+_BROADCASTER_RE = re.compile(
+    r"^(?:NHK|MBS|TBS|ABC|CBC|KBC|RKB|YBS|STV|OBS|HBC|RSK|TSC|BSS|SBS|TVQ|TVO|"
+    r"BS\s?\S{0,4}|CS\s?\S{0,4}|AT-X|Abema\S*|Hulu|Netflix|U-NEXT)[\s「『]",
+    re.IGNORECASE)
+
+
+def _is_media_title(title: str) -> bool:
+    return bool(_MEDIA_TITLE_RE.search(title) or _BROADCASTER_RE.search(title))
+
+
+def template_events(html: str, today: str) -> List["SiteEvent"]:
+    """「Googleカレンダーに追加」リンクから今後の予定を組み立てる。
+
+    recur=RRULE が付くもの(毎週のレギュラー番組など)と、TV/ラジオ/配信の類は
+    予定として扱わない。
+    """
+    out, seen = [], set()
+    for m in _TEMPLATE_LINK_RE.finditer(html or ""):
+        u = m.group(0).replace("&amp;", "&")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(u).query)
+        if q.get("recur"):
+            continue
+        title = (q.get("text") or [""])[0].strip()
+        dates = (q.get("dates") or [""])[0]
+        dm = re.match(r"(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?", dates)
+        if not title or not dm:
+            continue
+        if _is_media_title(title):
+            continue
+        day = f"{dm.group(1)}-{dm.group(2)}-{dm.group(3)}"
+        if day < today:
+            continue
+        when = f"{day} {dm.group(4)}:{dm.group(5)}" if dm.group(4) else day
+        key = (title, when)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(SiteEvent(event_name=title, event_datetime=when))
+    return out
+
+
 def calendar_links(html: str):
     """HTML 中の TimeTree / Google カレンダーのURLを重複なく返す。"""
     out = []
@@ -1178,14 +1232,16 @@ def fetch_site_content(site_url: str):
     # JSON-LD(schema.org Event)を抽出。名前+日時で重複除去。
     jsonld_events: List[SiteEvent] = []
     seen_ld = set()
+    today_ld = _today_jst()
     for h in htmls:
-        for ev in _parse_jsonld_events(h):
+        for ev in list(_parse_jsonld_events(h)) + template_events(h, today_ld):
             k = (ev.event_name, ev.event_datetime)
             if k not in seen_ld:
                 seen_ld.add(k)
                 jsonld_events.append(ev)
     if jsonld_events:
-        print(f"    JSON-LDから {len(jsonld_events)} 件のイベントを検出")
+        print(f"    構造化データ(JSON-LD/カレンダー追加リンク)から "
+              f"{len(jsonld_events)} 件のイベントを検出")
 
     cal_links = []
     for h in htmls:
