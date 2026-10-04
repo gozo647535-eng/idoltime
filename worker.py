@@ -592,6 +592,14 @@ def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
     return site_url
 
 
+# ページの見出しだけで、公演名になっていないもの
+_GENERIC_HEADING = re.compile(
+    r"^(?:schedule|news|event|live|ticket|tickets|info|information|home|top|more|view\s*more|"
+    r"予定|お知らせ|ニュース|スケジュール|イベント|ライブ|チケット|トップ|一覧|公演情報|最新情報|"
+    r"カレンダー|calendar)\W*$",
+    re.IGNORECASE)
+
+
 def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None,
                    anchors=None) -> Optional[dict]:
     """公式サイト由来の SiteEvent を auto_events 行に変換。tweet_id は合成した安定IDで重複排除。
@@ -604,6 +612,11 @@ def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None,
         return None
     if _RECEPTION_ONLY.search(ev.event_name) and not _REAL_GATHERING.search(ev.event_name):
         print(f"  チケット受付のためイベントにしません: {ev.event_name[:40]}")
+        return None
+    if _GENERIC_HEADING.match(ev.event_name.strip()):
+        # ページの見出し(「SCHEDULE」等)を公演名として拾ってしまった行。
+        # 公演名が無いので、イベントとしては使えない。
+        print(f"  ページ見出しのためイベントにしません: {ev.event_name[:40]}")
         return None
     sale = None
     if ev.sale_datetime:
