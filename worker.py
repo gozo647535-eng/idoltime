@@ -1689,9 +1689,12 @@ def main() -> int:
         # 直した日に、フル巡回(1日1回)を待たずに古い予定が消えるようにする。
         cleanup_orphan_rows()
         return 0
-    # SITE_ONLY=true は公式サイト巡回だけを回す確認用(数分)。
+    # SITE_ONLY / GCAL_ONLY は、その取り込みだけを回す確認用(数分)。
     if os.environ.get("SITE_ONLY", "").lower() == "true":
         run_sites()
+        return 0
+    if os.environ.get("GCAL_ONLY", "").lower() == "true":
+        run_gcal()
         return 0
     if not x_only:
         run_sites()

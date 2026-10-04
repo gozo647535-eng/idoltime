@@ -5,11 +5,11 @@ on:
     # 1日1回。UTC 9時 = Gemini無料枠の日次リセット(米国太平洋時間の深夜0時 ≒ UTC 7時)の直後に実行し、
     # 常にフレッシュな無料枠で回せるようにする(JST 18時)。
     - cron: '0 9 * * *'
-    # チケットサイト発見のみ。グループ名検索(45グループ/回)を足した実測が
-    # 10.2分で、1日5回だと約2,400分/月になり無料枠(2,000分)を超えるため1日3回。
-    # 3×約9分 + フル約40分 = 約67分/日 ≒ 2,010分/月… に対し一括書き込みで
-    # 短縮した分の余裕を見て、8時間間隔(フル巡回の 09:00 とは重ならない時刻)。
-    - cron: '37 3,11,19 * * *'
+    # チケットサイト発見のみ。実測はフル巡回が約42分、発見が約5分で、
+    # スケジュールだけで約50分/日(≒1,550分/月)。無料枠2,000分に対して、
+    # 動作確認の手動実行の分を残すため1日2回(12時間間隔)にしている。
+    # フル巡回の 09:00 とは重ならない時刻。
+    - cron: '37 1,13 * * *'
   workflow_dispatch:
     inputs:
       x_only:
@@ -28,6 +28,10 @@ on:
         description: "巡回するグループのslugをカンマ区切りで指定(順番待ちとsite_skipを無視。取れないサイトの切り分け用)"
         type: string
         default: ""
+      gcal_only:
+        description: "Googleカレンダーの取り込みのみ実行(1分ほど。カレンダーを登録した直後の確認用)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ingest
@@ -77,10 +81,11 @@ jobs:
           # どこで時間を使ったのかログから読めない(run #141 の切り分けで困った)。
           PYTHONUNBUFFERED: "1"
           # 発見のみモード: 高頻度側の cron、または手動実行のチェックで有効になる
-          DISCOVERY_ONLY: ${{ github.event.schedule == '37 3,11,19 * * *' || github.event.inputs.discovery_only == 'true' }}
+          DISCOVERY_ONLY: ${{ github.event.schedule == '37 1,13 * * *' || github.event.inputs.discovery_only == 'true' }}
           # 公式サイト巡回のみ / 対象グループの限定(どちらも手動実行の切り分け用)
           SITE_ONLY: ${{ github.event.inputs.site_only }}
           SITE_SLUGS: ${{ github.event.inputs.site_slugs }}
+          GCAL_ONLY: ${{ github.event.inputs.gcal_only }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}
           X_EMAIL: ${{ secrets.X_EMAIL }}
