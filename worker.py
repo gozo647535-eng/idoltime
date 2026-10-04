@@ -31,6 +31,7 @@ import eplus  # イープラス(e+)からの取得エンジン
 import gcal  # Google 公開カレンダー(ICS)からの取得エンジン
 import lineup  # 出演欄から図鑑の登録グループを突合
 import timetree
+import notetime
 import venuetext  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
 import ticketsite  # LivePocket / TiGET イベントページの構造化パーサ
@@ -202,6 +203,17 @@ def clean_venue(v: Optional[str]) -> Optional[str]:
     v = re.sub(r"\s+", " ", v).strip()
     v = re.sub(r"^(?:会場|場所|at|＠|@)\s*[:：]?\s*", "", v, flags=re.IGNORECASE)
     return v.strip() or None
+
+
+def stage_time_of(ev: dict) -> Optional[str]:
+    """そのグループの出演時刻。メモに「出演19:35-20:00」と書かれていれば取れる。
+
+    どのソースも構造化された出演時刻を持たないが、グループ自身のカレンダーの
+    メモには書かれていることが多い。メモはそのカレンダーの持ち主のものなので、
+    ここで取れる時刻はそのグループの出演時刻として扱える。
+    他グループへ相互反映した行(ttx:)には使わない(持ち主が違う)。
+    """
+    return notetime.stage_time_from_note(ev.get("note"))
 
 
 def venue_of(ev: dict) -> Optional[str]:
@@ -672,6 +684,7 @@ def build_gcal_row(slug: str, name: str, gc_url: str, ev: dict) -> Optional[dict
         "event_datetime": normalize_event_datetime(ev.get("event_datetime")),
         "open_time": open_t,
         "entry_time": entry_t,
+        "stage_time": stage_time_of(ev),
         "sale_datetime": to_timestamptz(ev.get("sale_datetime")),
         "is_first_come": bool(ev.get("is_first_come")),
         "ticket_url": ev.get("ticket_url"),
@@ -1194,6 +1207,7 @@ def build_timetree_row(slug: str, name: str, tt_url: str, ev: dict) -> Optional[
         "event_datetime": normalize_event_datetime(ev.get("event_datetime")),
         "open_time": open_t,
         "entry_time": entry_t,
+        "stage_time": stage_time_of(ev),
         "sale_datetime": sale,
         "is_first_come": bool(ev.get("is_first_come")),
         "ticket_url": ev.get("ticket_url"),
@@ -1239,6 +1253,8 @@ def _fanout_lineup(row: dict, lineup_idx, today: str, touched: set) -> int:
         xr = dict(row)
         xr["idol_slug"] = other
         xr["tweet_id"] = f"ttx:{other}:{tid[len(prefix):]}:{date.replace('-', '')}"
+        # 出演時刻は元のカレンダーの持ち主のものなので、反映先には持ち込まない
+        xr.pop("stage_time", None)
         batch.append(xr)
         touched.add(other)
     try:

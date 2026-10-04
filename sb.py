@@ -39,8 +39,38 @@ def _request(method, path, params=None, body=None, headers=None):
         raise RuntimeError(f"Supabase {method} {path} failed: HTTP {e.code} {text[:300]}")
 
 
+# auto_events に後から足した列。SQL を実行していない環境では落とす
+# (列が無いまま POST すると PostgREST が 400 を返し、その回の取り込みが丸ごと失敗する)
+OPTIONAL_COLUMNS = ("stage_time",)
+_available_columns = None
+
+
+def _drop_missing_columns(rows):
+    global _available_columns
+    if _available_columns is None:
+        _available_columns = set()
+        for col in OPTIONAL_COLUMNS:
+            try:
+                _request("GET", "auto_events", params={"select": col, "limit": "1"})
+                _available_columns.add(col)
+            except Exception:
+                pass
+        missing = [c for c in OPTIONAL_COLUMNS if c not in _available_columns]
+        if missing:
+            print("  auto_events に未追加の列があるため書き込みません: "
+                  + ", ".join(missing)
+                  + "(SQL: alter table public.auto_events add column "
+                  + " text, add column ".join(missing) + " text;)")
+    for col in OPTIONAL_COLUMNS:
+        if col not in _available_columns:
+            for r in rows:
+                r.pop(col, None)
+    return rows
+
+
 def upsert_auto_event(row: dict):
     """tweet_id をキーに auto_events を upsert(重複投稿は上書き)。"""
+    _drop_missing_columns([row])
     _request(
         "POST",
         "auto_events",
@@ -53,7 +83,7 @@ def upsert_auto_event(row: dict):
 def upsert_auto_events(rows):
     """auto_events を一括 upsert。1行ずつ POST すると件数分のHTTP往復になる
     (フェス1本で150グループ分の行が立つため、ここが実行時間を食っていた)。"""
-    rows = [r for r in rows if r]
+    rows = _drop_missing_columns([r for r in rows if r])
     if not rows:
         return
     for i in range(0, len(rows), 200):

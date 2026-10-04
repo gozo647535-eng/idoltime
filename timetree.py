@@ -89,7 +89,10 @@ _TICKET_URL_BARE_RE = re.compile(
 
 
 # 開場/入場時刻を自由文から拾う(「開場18:00」「開場 18時00分」「開場:18:00」等)
-_OPEN_TIME_RE = re.compile(r"開場\s*[:：]?\s*(\d{1,2})\s*[:：時]\s*(\d{2})")
+# 「開場 16:30」だけでなく「OPEN 16:30」「OP.16:30」も拾う
+# (日本語表記しか見ていなかったため、実測で453行の開場時刻を取り落としていた)
+_OPEN_TIME_RE = re.compile(
+    r"(?:開場|OPEN|OP)\s*[.:：／/｜|]?\s*(\d{1,2})\s*[:：時]\s*(\d{2})", re.IGNORECASE)
 _ENTRY_TIME_RE = re.compile(r"入場\s*[:：]?\s*(\d{1,2})\s*[:：時]\s*(\d{2})")
 
 
