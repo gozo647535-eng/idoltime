@@ -861,7 +861,10 @@ def merge_site_events(jsonld_events, gemini_events):
 
 # 1回のフル実行で巡回する公式サイト数の上限。1サイトあたり約36秒(描画とサブページ
 # 取得を含む)なので、登録サイトが増えても実行時間が一定になるようにする。
-SITE_BATCH = int(os.environ.get("SITE_BATCH", "65"))
+# 1回に巡回する公式サイトの数。実測で1組17〜26秒(JS描画+サブページ取得)かかり、
+# 65組だとフル巡回42分の半分以上をここで使っていた。一方 LLM の日次枠で実際に
+# 抽出できるのは十数組で、残りは取得時間を払うだけになっていた。枠に見合う数に絞る。
+SITE_BATCH = int(os.environ.get("SITE_BATCH", "30"))
 # LLMが連続でこの回数使えなければ、その回の公式サイト巡回は打ち切る
 LLM_DEAD_LIMIT = int(os.environ.get("LLM_DEAD_LIMIT", "8"))
 # TimeTree も同様。1カレンダーはAPI1回だが、各イベントの TicketDive 補完に
