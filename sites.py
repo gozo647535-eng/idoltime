@@ -1215,6 +1215,36 @@ def template_events(html: str, today: str) -> List["SiteEvent"]:
     return out
 
 
+# 公演ごとの詳細ページを探すためのリンク。イベント名に一致するリンク文字列が
+# あれば、そのURLを案内先にできる(サイトのトップに飛ばすより親切)。
+_ANCHOR_MIN_TEXT = 6
+
+
+def page_anchors(html: str, base_url: str):
+    """ページ内の同一ドメインのリンクを [(リンク文字列, URL)] で返す。
+
+    ヘッダ・フッタ・ナビのリンクは公演名と関係ないので除く。
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup(["header", "footer", "nav", "script", "style"]):
+        tag.decompose()
+    base_host = urlparse(base_url).netloc
+    out, seen = [], set()
+    for a in soup.find_all("a", href=True):
+        text = re.sub(r"\s+", " ", a.get_text() or "").strip()
+        if len(text) < _ANCHOR_MIN_TEXT:
+            continue
+        full = urljoin(base_url, a["href"]).split("#", 1)[0]
+        if urlparse(full).netloc != base_host or _NOT_A_PAGE.search(urlparse(full).path):
+            continue
+        key = (text, full)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((text, full))
+    return out
+
+
 def calendar_links(html: str):
     """HTML 中の TimeTree / Google カレンダーのURLを重複なく返す。"""
     out = []
@@ -1227,9 +1257,10 @@ def calendar_links(html: str):
 
 def fetch_site_content(site_url: str):
     """公式サイト(+ News/Schedule サブページ)を取得し (content_hash, combined_text, jsonld_events)
-    を返す(併せて、ページに貼られている公開カレンダーのURLと、本文に付けた
-    ページ番号→URLの対応も返す。後者は LLM が返す source_page の解決に使う)。
-    取得できなければ (None, '', [], [], [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
+    を返す(併せて、ページに貼られている公開カレンダーのURL、本文に付けた
+    ページ番号→URLの対応、ページ内のリンク一覧も返す。ページ番号は LLM が返す
+    source_page の解決に、リンク一覧は公演ごとの詳細ページ探しに使う)。
+    取得できなければ (None, '', [], [], [], [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
     変化があるときだけ extract_events を呼ぶことで、無料枠の消費を最小化する)。
     静的HTMLの可視テキストが極端に短い(JS描画のSPA)場合は、ヘッドレスChromiumで
     描画し直す(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。
@@ -1304,9 +1335,14 @@ def fetch_site_content(site_url: str):
             if u2 not in cal_links:
                 cal_links.append(u2)
 
+    anchors = []
+    for u, h in pages:
+        for pair in page_anchors(h, u):
+            if pair not in anchors:
+                anchors.append(pair)
     page_urls = page_tags
     if not texts and not jsonld_events:
-        return None, "", [], cal_links, page_urls
+        return None, "", [], cal_links, page_urls, anchors
     combined = "\n\n".join(texts)
     # PROMPT_VERSION と JSON-LD署名を含めることで、本文/構造化データが変わると再抽出が走る。
     # JS描画で本文が変われば content_hash も変わるため、既読SPAサイトも自動で再抽出される。
@@ -1321,7 +1357,7 @@ def fetch_site_content(site_url: str):
     content_hash = hashlib.sha1(
         (PROMPT_VERSION + "\n" + combined + "\n" + ld_sig).encode("utf-8", "ignore")
     ).hexdigest()
-    return content_hash, combined, jsonld_events, cal_links, page_urls
+    return content_hash, combined, jsonld_events, cal_links, page_urls, anchors
 
 
 def has_future_dates(text: str) -> bool:

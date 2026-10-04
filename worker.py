@@ -530,12 +530,44 @@ def _sane_sale_datetime(sale: Optional[str], event_dt: Optional[str], name: str)
     return None
 
 
-def _site_event_url(ev, site_url: str, page_tags=None) -> str:
+def _event_anchor_url(name: str, anchors) -> Optional[str]:
+    """公演名に一致するリンクを探して、そのURLを返す。
+
+    サイトは公演ごとに詳細ページを持っていることが多く、一覧からは公演名の
+    リンクで飛べる。リンク文字列と公演名のどちらかが他方を含んでいれば同じ公演と
+    見なし、いちばん長く一致したものを採る(「詳細」「チケット」のような短い
+    リンクは page_anchors の段階で除いてある)。
+    """
+    key = lineup._light(name or "")
+    key = re.sub(r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]", "", key)
+    if len(key) < 6:
+        return None
+    # ① 公演名をそのまま含むリンク → いちばん短いもの(余計な語が少ない=その公演の
+    #    ページらしい。ニュース一覧の長い見出しリンクに引っ張られないようにする)
+    # ② 無ければ、公演名に含まれるリンク文字列 → いちばん長いもの
+    contains, contained = [], []
+    for text, url in (anchors or []):
+        t = re.sub(r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]", "", lineup._light(text))
+        if len(t) < 6:
+            continue
+        if key in t:
+            contains.append((len(t), url))
+        elif t in key:
+            contained.append((len(t), url))
+    if contains:
+        return min(contains)[1]
+    if contained:
+        return max(contained)[1]
+    return None
+
+
+def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
     """公演の案内先URL。
 
     ① 構造化データが持っていた公演ページのURL(同じサイト内のときだけ採る)
-    ② LLM が答えたページ番号(P1 等)に対応するURL
-    ③ どちらも無ければサイトのトップ
+    ② 公演名に一致するリンク(= その公演の詳細ページ)
+    ③ LLM が答えたページ番号(P1 等)に対応するURL
+    ④ どれも無ければサイトのトップ
     の順に選ぶ。チケットURLが無い公演はアプリからここへ案内する。
     """
     def host(u: str) -> str:
@@ -548,6 +580,9 @@ def _site_event_url(ev, site_url: str, page_tags=None) -> str:
                 return src
         except Exception:
             pass
+    hit = _event_anchor_url(getattr(ev, "event_name", "") or "", anchors)
+    if hit and hit.rstrip("/") != site_url.rstrip("/"):
+        return hit
     tag = (getattr(ev, "source_page", None) or "").strip().upper()
     if tag:
         for t, u in (page_tags or []):
@@ -556,7 +591,8 @@ def _site_event_url(ev, site_url: str, page_tags=None) -> str:
     return site_url
 
 
-def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None) -> Optional[dict]:
+def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None,
+                   anchors=None) -> Optional[dict]:
     """公式サイト由来の SiteEvent を auto_events 行に変換。tweet_id は合成した安定IDで重複排除。
 
     tweet_url は、その公演が書かれていたページ(source_url)を優先する。チケットURLが
@@ -591,7 +627,7 @@ def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None) -> O
         "max_tickets": None,
         "other_details": clean_venue(ev.venue),
         "raw_text": None,
-        "tweet_url": _site_event_url(ev, site_url, page_tags),
+        "tweet_url": _site_event_url(ev, site_url, page_tags, anchors),
     }
 
 
@@ -981,7 +1017,7 @@ def run_sites() -> int:
         print(f"{name} の公式サイトを確認: {url}")
         try:
             (content_hash, combined, jsonld_events,
-             cal_links, page_tags) = sites.fetch_site_content(url)
+             cal_links, page_tags, anchors) = sites.fetch_site_content(url)
         except Exception as e:
             print(f"  失敗: {e}")
             processed.append(slug)
@@ -1031,7 +1067,7 @@ def run_sites() -> int:
         count = 0
         emitted_ids = set()
         for ev in merged:
-            row = build_site_row(slug, name, url, ev, page_tags)
+            row = build_site_row(slug, name, url, ev, page_tags, anchors)
             if row:
                 enrich_row_with_ticketdive(row)
                 try:
