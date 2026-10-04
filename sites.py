@@ -30,7 +30,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v20"
+PROMPT_VERSION = "v21"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -925,7 +925,7 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
 
 出力は次の形の JSON オブジェクトのみ(前後に説明文やコードフェンスを付けない)。
 文字列の中では二重引用符(")を使わず、必要なら『』や「」に置き換えること(JSONが壊れるため):
-{{"events": [{{"event_name": str, "event_datetime": str, "open_time": str|null, "entry_time": str|null, "sale_datetime": str|null, "is_first_come": bool, "ticket_url": str|null, "venue": str|null, "source_page": str|null, "ticket_types": [{{"name": str, "price": str}}]}}]}}
+{{"events": [{{"event_name": str, "event_datetime": str, "open_time": str|null, "entry_time": str|null, "sale_datetime": str|null, "is_first_come": bool, "ticket_url": str|null, "venue": str|null, "ticket_types": [{{"name": str, "price": str}}]}}]}}
 
 厳守事項:
 - 開催日が {today} より前の、すでに終了した公演は**絶対に含めない**(過去の公演は除外)
@@ -939,10 +939,9 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
 - チケットが分かる場合のみ: sale_datetime(発売/受付/先行/抽選申込の開始日時)は 'YYYY-MM-DD HH:MM:SS' 形式、is_first_come、ticket_types、ticket_url を埋める。無ければ null/空でよい
 - open_time(開場)・entry_time(入場)は本文に明記がある場合のみ 'HH:MM'(無ければ null)
 - venue(会場)は分かれば入れる。同じ公演を重複させない
-- 行頭が「【ページ】」の行は、以降の記述がどのページから来たかを示す見出しで、「P1」のような番号が付いている。
+- 行頭が「【ページ】」の行は、以降の記述がどのページから来たかを示す見出しである。
   日付や open/start だけが並んでいて公演名が見当たらない場合は、直前の「【ページ】」の
   見出しを公演名として使ってよい(特設ページは公演名が見出しにしか無いことがある)
-- source_page には、その公演の記述があった直前の「【ページ】」行の番号(P1 等)をそのまま入れる
 - 該当が無ければ events は空配列にする
 
 【イベント関連テキスト】
@@ -1305,13 +1304,13 @@ def fetch_site_content(site_url: str):
         # 付けておくと、名前の無い日付のかたまりにも公演名を与えられる。
         # URL も添えて、公演ごとの案内先をLLMに選ばせる。
         t = stitch_calendar_days(stitch_split_dates(t))
-        # 見出しには URL ではなくページ番号を付ける。URLをそのまま載せると
-        # 6ページで300字ほど食い、本文に割ける字数(=取れる公演数)が減るうえ、
-        # LLM が似たURLを作ってしまう余地も残る。番号なら数字の対応を見るだけで済む。
-        title = _page_title(h)[:40]
-        tag = f"P{len(texts) + 1}"
-        page_tags.append((tag, u))
-        texts.append(f"{PAGE_MARK}{tag} {title}\n{t}" if title else f"{PAGE_MARK}{tag}\n{t}")
+        # 本文に渡すのは見出しだけにする。ページ番号やURLを足して公演ごとの案内先を
+        # LLM に答えさせていたが、項目が増えた分だけ出力が長くなり、上限で打ち切られて
+        # 取れる公演が激減した(いぎなり東北産が13件→2件)。案内先はリンク文字列と
+        # 公演名の突合(LLM不要)で解決できるので、プロンプトは元の形に戻す。
+        title = _page_title(h)
+        page_tags.append((f"P{len(texts) + 1}", u))
+        texts.append(f"{PAGE_MARK}{title}\n{t}" if title else t)
 
     # JSON-LD(schema.org Event)を抽出。名前+日時で重複除去。
     jsonld_events: List[SiteEvent] = []

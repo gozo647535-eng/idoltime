@@ -1047,8 +1047,11 @@ def run_sites() -> int:
             processed.append(slug)
             continue
         retry_zero = seen == f"{content_hash}|z1"
+        retry_low = seen == f"{content_hash}|low"
         if retry_zero:
             print("  前回0件だったため再抽出します")
+        if retry_low:
+            print("  前回大きく減ったため再抽出します(今回は結果をそのまま反映します)")
         llm_events = sites.extract_events_any(groq_client, gemini_client, name, combined)
         llm_ok = llm_events is not None
         if not llm_ok:
@@ -1081,22 +1084,42 @@ def run_sites() -> int:
                     print(f"  書き込み失敗: {e}")
 
         if llm_ok:
-            # 再突合: 今回出力しなかった過去のsite行(終了・削除・変更済み)を掃除して最新に保つ
-            removed = 0
             try:
-                for old_id in sb.get_auto_event_ids(slug, prefix=f"site:{slug}:"):
-                    if old_id not in emitted_ids:
-                        sb.delete_auto_event(old_id)
-                        removed += 1
+                old_ids = sb.get_auto_event_ids(slug, prefix=f"site:{slug}:")
             except Exception as e:
-                print(f"  再突合(削除)でエラー: {e}")
-            if count == 0 and not retry_zero and sites.has_future_dates(combined):
-                # 素材に今後の日付があるのに1件も取れていない → 次回もう一度だけ試す
-                sb.set_last_seen(state_key, f"{content_hash}|z1")
-                print("  0 件(本文に今後の日付あり)。次回もう一度抽出します")
+                print(f"  既存行の取得でエラー(削除は見送り): {e}")
+                old_ids = None
+            # 抽出が前回の半分未満に減ったのに素材には今後の日付がある、というのは
+            # 公演が消えたのではなく抽出が失敗した形(出力の打ち切り・モデルの不調)の
+            # ことが多い。いぎなり東北産が13件→2件になり11件消えた事故がこれだった。
+            # そういう回は削除せず、取れた分だけ足して次回やり直す。
+            suspicious = (
+                old_ids is not None
+                and len(old_ids) >= 4
+                and count < len(old_ids) / 2
+                and not retry_low
+                and sites.has_future_dates(combined)
+            )
+            removed = 0
+            if suspicious:
+                sb.set_last_seen(state_key, f"{content_hash}|low")
+                print(f"  {count} 件しか取れず前回の {len(old_ids)} 件から大きく減るため、"
+                      f"削除は見送って次回やり直します")
             else:
-                sb.set_last_seen(state_key, content_hash)
-                print(f"  {count} 件反映 / {removed} 件削除")
+                try:
+                    for old_id in (old_ids or []):
+                        if old_id not in emitted_ids:
+                            sb.delete_auto_event(old_id)
+                            removed += 1
+                except Exception as e:
+                    print(f"  再突合(削除)でエラー: {e}")
+                if count == 0 and not retry_zero and sites.has_future_dates(combined):
+                    # 素材に今後の日付があるのに1件も取れていない → 次回もう一度だけ試す
+                    sb.set_last_seen(state_key, f"{content_hash}|z1")
+                    print("  0 件(本文に今後の日付あり)。次回もう一度抽出します")
+                else:
+                    sb.set_last_seen(state_key, content_hash)
+                    print(f"  {count} 件反映 / {removed} 件削除")
         else:
             # LLM一時失敗: JSON-LD分だけ即反映。削除・状態更新はせず次回再試行する
             # (既存のLLM由来イベントを枠切れで消さないため、reconcileとhash更新は行わない)
