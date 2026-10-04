@@ -30,7 +30,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v18"
+PROMPT_VERSION = "v20"
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -379,6 +379,11 @@ def _page_title(html: str) -> str:
     return ""
 
 
+# ページではないリンク(カレンダーの単発ICS・資料・画像など)
+_NOT_A_PAGE = re.compile(
+    r"\.(ics|pdf|jpe?g|png|gif|webp|svg|zip|mp4|mp3|docx?|xlsx?)$", re.IGNORECASE)
+
+
 def _find_subpages(html: str, base_url: str) -> List[str]:
     """同一ドメイン内のサブページURLを、予定が載っていそうな順に返す。
 
@@ -401,6 +406,8 @@ def _find_subpages(html: str, base_url: str) -> List[str]:
             full = full.rstrip("/")
         if urlparse(full).netloc != base_host or full.rstrip("/") == base_url.rstrip("/"):
             continue
+        if _NOT_A_PAGE.search(urlparse(full).path):
+            continue   # ICS・PDF・画像などはページではない
         if full not in ranked or tier < ranked[full]:
             ranked[full] = tier
     order = {u: i for i, u in enumerate(ranked)}
@@ -433,16 +440,16 @@ def _render_page(url: str) -> Optional[str]:
         return None
 
 
-def _render_site(site_url: str) -> List[str]:
+def _render_site(site_url: str) -> List[tuple]:
     """JS描画(SPA)サイトをヘッドレスChromiumで開き、home + 関連サブページの
-    描画後の生HTMLを返す(可視テキストとJSON-LDの両方に使う)。
+    (URL, 描画後の生HTML) を返す(可視テキストとJSON-LDの両方に使う)。
     playwright未導入・失敗時は [](静的処理にフォールバック)。
     ※GitHub Actions は直接ネット接続なのでプロキシ設定は不要。"""
     try:
         from playwright.sync_api import sync_playwright
     except Exception:
         return []
-    htmls: List[str] = []
+    htmls: List[tuple] = []   # (URL, 描画後HTML)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -458,11 +465,11 @@ def _render_site(site_url: str) -> List[str]:
                     return page.content()
 
                 home_html = render(site_url)
-                htmls.append(home_html)
+                htmls.append((site_url, home_html))
                 subs = _find_subpages(home_html, site_url)
                 for sub in subs[: RENDER_MAX_PAGES - 1]:
                     try:
-                        htmls.append(render(sub))
+                        htmls.append((sub, render(sub)))
                     except Exception as e:
                         print(f"    JSレンダリング失敗(サブ) {sub}: {e}")
             finally:
@@ -470,7 +477,7 @@ def _render_site(site_url: str) -> List[str]:
     except Exception as e:
         print(f"    JSレンダリング失敗 {site_url}: {e}")
         return []
-    return [h for h in htmls if h]
+    return [(u, h) for u, h in htmls if h]
 
 
 class TicketType(BaseModel):
@@ -498,6 +505,10 @@ class SiteEvent(BaseModel):
     ticket_url: Optional[str] = Field(None, description="チケット販売/詳細ページのURL")
     venue: Optional[str] = Field(None, description="会場")
     ticket_types: List[TicketType] = Field(default=[], description="券種と料金")
+    # その公演の記述があったページのURL。アプリでイベントから飛ぶ先に使う
+    # (チケットURLが無い公演は、サイトのトップではなくこのページへ案内したい)。
+    source_url: Optional[str] = Field(None, description="その公演の記述があったページのURL")
+    source_page: Optional[str] = Field(None, description="その公演の記述があった【ページ】の番号(P1 など)")
 
     # LLM(特にJSONモードのGroq)は必須でない項目に null を返すことがある。
     # null を既定値に丸めて、1項目の null で抽出全体が落ちるのを防ぐ。
@@ -630,6 +641,13 @@ def _jsonld_offers(offers):
     return url, sale, types
 
 
+def _ld_url(v) -> Optional[str]:
+    """JSON-LD の url。http(s) の絶対URLのときだけ採る。"""
+    u = v if isinstance(v, str) else (v.get("url") if isinstance(v, dict) else None)
+    u = (u or "").strip()
+    return u if u.startswith("http") else None
+
+
 def _jsonld_to_site_event(obj: dict, today: str) -> Optional[SiteEvent]:
     name = obj.get("name")
     start = obj.get("startDate")
@@ -652,6 +670,8 @@ def _jsonld_to_site_event(obj: dict, today: str) -> Optional[SiteEvent]:
         ticket_url=ticket_url,
         venue=_jsonld_location_name(obj.get("location")),
         ticket_types=ticket_types,
+        # 構造化データが公演ページのURLを持っていれば、それを案内先にする
+        source_url=_ld_url(obj.get("url")),
     )
 
 
@@ -905,7 +925,7 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
 
 出力は次の形の JSON オブジェクトのみ(前後に説明文やコードフェンスを付けない)。
 文字列の中では二重引用符(")を使わず、必要なら『』や「」に置き換えること(JSONが壊れるため):
-{{"events": [{{"event_name": str, "event_datetime": str, "open_time": str|null, "entry_time": str|null, "sale_datetime": str|null, "is_first_come": bool, "ticket_url": str|null, "venue": str|null, "ticket_types": [{{"name": str, "price": str}}]}}]}}
+{{"events": [{{"event_name": str, "event_datetime": str, "open_time": str|null, "entry_time": str|null, "sale_datetime": str|null, "is_first_come": bool, "ticket_url": str|null, "venue": str|null, "source_page": str|null, "ticket_types": [{{"name": str, "price": str}}]}}]}}
 
 厳守事項:
 - 開催日が {today} より前の、すでに終了した公演は**絶対に含めない**(過去の公演は除外)
@@ -919,9 +939,10 @@ def _build_extract_prompt(name: str, text: str, today: str) -> str:
 - チケットが分かる場合のみ: sale_datetime(発売/受付/先行/抽選申込の開始日時)は 'YYYY-MM-DD HH:MM:SS' 形式、is_first_come、ticket_types、ticket_url を埋める。無ければ null/空でよい
 - open_time(開場)・entry_time(入場)は本文に明記がある場合のみ 'HH:MM'(無ければ null)
 - venue(会場)は分かれば入れる。同じ公演を重複させない
-- 行頭が「【ページ】」の行は、以降の記述がどのページから来たかを示す見出しである。
+- 行頭が「【ページ】」の行は、以降の記述がどのページから来たかを示す見出しで、「P1」のような番号が付いている。
   日付や open/start だけが並んでいて公演名が見当たらない場合は、直前の「【ページ】」の
   見出しを公演名として使ってよい(特設ページは公演名が見出しにしか無いことがある)
+- source_page には、その公演の記述があった直前の「【ページ】」行の番号(P1 等)をそのまま入れる
 - 該当が無ければ events は空配列にする
 
 【イベント関連テキスト】
@@ -1206,8 +1227,9 @@ def calendar_links(html: str):
 
 def fetch_site_content(site_url: str):
     """公式サイト(+ News/Schedule サブページ)を取得し (content_hash, combined_text, jsonld_events)
-    を返す(併せて、ページに貼られている公開カレンダーのURLも返す)。
-    取得できなければ (None, '', [], [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
+    を返す(併せて、ページに貼られている公開カレンダーのURLと、本文に付けた
+    ページ番号→URLの対応も返す。後者は LLM が返す source_page の解決に使う)。
+    取得できなければ (None, '', [], [], [])。**Geminiは呼ばない**(呼び出し側で content_hash を見て
     変化があるときだけ extract_events を呼ぶことで、無料枠の消費を最小化する)。
     静的HTMLの可視テキストが極端に短い(JS描画のSPA)場合は、ヘッドレスChromiumで
     描画し直す(いぎなり東北産・RE-GE のような予定表がJSで描画されるサイト対策)。
@@ -1216,63 +1238,75 @@ def fetch_site_content(site_url: str):
 
     home = _get(site_url)
     home_text = _html_to_text(home) if home else ""
-    htmls: List[str] = []
+    # (URL, HTML) の組で持つ。どのページに書かれていた公演かを行に残すため
+    # (チケットURLが無い公演の案内先を、サイトのトップではなくそのページにする)。
+    pages: List[tuple] = []
 
     if len(home_text) < RENDER_MIN_CHARS:
         # SPAの可能性 → ヘッドレスで取り直す。描画で本文が増えればそれ(生HTML)を使う。
         rendered = _render_site(site_url)
-        rendered_text_len = sum(len(_html_to_text(h)) for h in rendered)
+        rendered_text_len = sum(len(_html_to_text(h)) for _u, h in rendered)
         if rendered_text_len > len(home_text):
             print(f"    JS描画で取得(静的{len(home_text)}字→描画{rendered_text_len}字)")
-            htmls = rendered
+            pages = rendered
         else:
             if home:
-                htmls.append(home)
+                pages.append((site_url, home))
             for sub in (_find_subpages(home, site_url) if home else []):
                 h = _fetch_subpage(sub)
                 if h:
-                    htmls.append(h)
+                    pages.append((sub, h))
     else:
-        htmls = [home]
+        pages = [(site_url, home)]
         for sub in _find_subpages(home, site_url):
             h = _fetch_subpage(sub)
             if h:
-                htmls.append(h)
+                pages.append((sub, h))
 
     texts = []
-    for h in htmls:
+    page_tags = []   # [(P番号, URL)] 本文に出した見出しと実URLの対応
+    for u, h in pages:
         t = _html_to_text(h)
         if not t:
             continue
         # 特設ページは「DATE／TIME / 2026年12月19日(土)」のように日付だけが並び、
         # 公演名はページ見出しにしか無いことがある。どのページの記述かを示す行を
         # 付けておくと、名前の無い日付のかたまりにも公演名を与えられる。
+        # URL も添えて、公演ごとの案内先をLLMに選ばせる。
         t = stitch_calendar_days(stitch_split_dates(t))
-        title = _page_title(h)
-        texts.append(f"{PAGE_MARK}{title}\n{t}" if title else t)
+        # 見出しには URL ではなくページ番号を付ける。URLをそのまま載せると
+        # 6ページで300字ほど食い、本文に割ける字数(=取れる公演数)が減るうえ、
+        # LLM が似たURLを作ってしまう余地も残る。番号なら数字の対応を見るだけで済む。
+        title = _page_title(h)[:40]
+        tag = f"P{len(texts) + 1}"
+        page_tags.append((tag, u))
+        texts.append(f"{PAGE_MARK}{tag} {title}\n{t}" if title else f"{PAGE_MARK}{tag}\n{t}")
 
     # JSON-LD(schema.org Event)を抽出。名前+日時で重複除去。
     jsonld_events: List[SiteEvent] = []
     seen_ld = set()
     today_ld = _today_jst()
-    for h in htmls:
+    for u, h in pages:
         for ev in list(_parse_jsonld_events(h)) + template_events(h, today_ld):
             k = (ev.event_name, ev.event_datetime)
             if k not in seen_ld:
                 seen_ld.add(k)
+                if not ev.source_url:
+                    ev.source_url = u
                 jsonld_events.append(ev)
     if jsonld_events:
         print(f"    構造化データ(JSON-LD/カレンダー追加リンク)から "
               f"{len(jsonld_events)} 件のイベントを検出")
 
     cal_links = []
-    for h in htmls:
-        for u in calendar_links(h):
-            if u not in cal_links:
-                cal_links.append(u)
+    for _u, h in pages:
+        for u2 in calendar_links(h):
+            if u2 not in cal_links:
+                cal_links.append(u2)
 
+    page_urls = page_tags
     if not texts and not jsonld_events:
-        return None, "", [], cal_links
+        return None, "", [], cal_links, page_urls
     combined = "\n\n".join(texts)
     # PROMPT_VERSION と JSON-LD署名を含めることで、本文/構造化データが変わると再抽出が走る。
     # JS描画で本文が変われば content_hash も変わるため、既読SPAサイトも自動で再抽出される。
@@ -1287,7 +1321,7 @@ def fetch_site_content(site_url: str):
     content_hash = hashlib.sha1(
         (PROMPT_VERSION + "\n" + combined + "\n" + ld_sig).encode("utf-8", "ignore")
     ).hexdigest()
-    return content_hash, combined, jsonld_events, cal_links
+    return content_hash, combined, jsonld_events, cal_links, page_urls
 
 
 def has_future_dates(text: str) -> bool:
