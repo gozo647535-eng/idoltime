@@ -919,10 +919,25 @@ LLM_DEAD_LIMIT = int(os.environ.get("LLM_DEAD_LIMIT", "8"))
 TT_BATCH = int(os.environ.get("TT_BATCH", "45"))
 
 
+# 公演がこの日数内のグループを「直前」として先に巡回する。出演時刻は公演の
+# 直前に書き込まれるため、ここを過ぎてから読んでも間に合わない。
+IMMINENT_DAYS = int(os.environ.get("IMMINENT_DAYS", "4"))
+# 1回の巡回枠のうち、直前のグループに割り当てる割合。全部を直前優先にすると
+# 出演予定が無いグループ(=取り込めていないグループ)がいつまでも読まれない。
+IMMINENT_SHARE = float(os.environ.get("IMMINENT_SHARE", "0.6"))
+
+
 def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: bool = True):
     """巡回対象を上限 batch 件に絞る。登録数が増えても実行時間を一定に保つ。
 
-    順番は ① 今後のイベントが少ないグループ ② 最後に巡回した日が古いグループ。
+    枠を2つに分ける。
+      ① 公演が近い順(IMMINENT_DAYS 日内)。枠の IMMINENT_SHARE を割り当てる
+      ② 今後のイベントが少ない順 → 最後に巡回した日が古い順。残りの枠
+
+    ①が要るのは出演時刻のため。「出演19:35-20:00」は公演の1〜3日前に各グループが
+    カレンダーへ書き込むので、直前のグループを後回しにするとタイムテーブルを
+    埋められないまま当日を過ぎてしまう。
+    ②を残すのは、出演予定が1件も取れていないグループを飢えさせないため。
     内容ハッシュで抽出はスキップできるが、ハッシュを出すための取得自体は毎回
     走るので、ここで絞らないと登録数に比例して時間が伸びる。
     """
@@ -937,12 +952,31 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: 
         last_by_key = sb.get_last_seen_by_prefix(f"{key_prefix}:")
     except Exception:
         last_by_key = {}
-    ranked = sorted(
-        watch,
-        key=lambda e: (counts.get(e["idol_slug"], 0),
-                       last_by_key.get(f"{key_prefix}:{e['idol_slug']}") or ""),
+    try:
+        next_date = sb.get_next_event_dates(today)
+    except Exception as e:
+        print(f"  次の出演予定の取得に失敗(この優先は使いません): {e}")
+        next_date = {}
+    limit = (datetime.date.fromisoformat(today)
+             + datetime.timedelta(days=IMMINENT_DAYS)).isoformat()
+
+    def last_seen(e):
+        return last_by_key.get(f"{key_prefix}:{e['idol_slug']}") or ""
+
+    soon = sorted(
+        (e for e in watch if today <= (next_date.get(e["idol_slug"]) or "9999") < limit),
+        key=lambda e: (next_date[e["idol_slug"]], last_seen(e)),
     )
-    picked = ranked[:batch]
+    rest = sorted(
+        (e for e in watch if e not in soon),
+        key=lambda e: (counts.get(e["idol_slug"], 0), last_seen(e)),
+    )
+    n_soon = min(len(soon), int(batch * IMMINENT_SHARE))
+    picked = soon[:n_soon] + rest[: batch - n_soon]
+    # 片方が足りなければもう片方で埋める
+    if len(picked) < batch:
+        extra = [e for e in soon[n_soon:] + rest if e not in picked]
+        picked += extra[: batch - len(picked)]
     # record=False のときは呼び出し側が「実際に処理できたグループ」だけを記録する
     # (枠切れで抽出できなかったグループまで巡回済みにすると、次の順番が一巡後に
     # なってしまい、いつまでも取り込めない)
@@ -953,7 +987,7 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: 
             print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e2}")
     thin = sum(1 for e in picked if counts.get(e["idol_slug"], 0) < 3)
     print(f"  今回の{label}巡回は {len(picked)} / {len(watch)} 件"
-          f"(今後3件未満のグループ {thin} 件を優先・残りは次回)")
+          f"({IMMINENT_DAYS}日内に公演 {n_soon} 件・今後3件未満 {thin} 件を優先・残りは次回)")
     return picked
 
 

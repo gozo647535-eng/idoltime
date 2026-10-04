@@ -1,3 +1,36 @@
+def get_next_event_dates(today: str):
+    """idol_slug → 次の出演予定日(today以降で最も早い日) を返す。
+
+    巡回の優先度決めに使う。出演時刻(「出演19:35-20:00」)は公演の1〜3日前に
+    各グループがカレンダーへ書き込むため、公演が近いグループを先に読まないと
+    タイムテーブルを埋められないまま当日を過ぎてしまう。
+    """
+    out = {}
+    for offset in range(0, 20000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": "idol_slug,event_datetime",
+                "hidden": "eq.false",
+                "event_datetime": f"gte.{today}",
+                "order": "tweet_id",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        for r in rows:
+            slug, dt = r.get("idol_slug"), (r.get("event_datetime") or "")[:10]
+            if not slug or not dt:
+                continue
+            if slug not in out or dt < out[slug]:
+                out[slug] = dt
+        if len(rows) < 1000:
+            break
+    return out
+
+
 """Supabase(PostgREST)への入出力。標準ライブラリのみで依存を最小化。
 
 service_role キーで書き込むため、SUPABASE_SERVICE_KEY は絶対に公開しないこと
@@ -179,6 +212,35 @@ def get_upcoming_counts(today: str):
         if len(rows) < 1000:
             break
     return counts
+
+
+def get_imminent_slugs(today: str, until: str):
+    """today〜until に出演予定のある idol_slug の集合を返す。
+
+    巡回の優先度決めに使う。出演時刻(「出演19:35-20:00」)は公演の1〜3日前に
+    各グループがカレンダーへ書き込むため、直前のグループを先に読まないと
+    タイムテーブルを埋められないまま当日を過ぎてしまう。
+    """
+    out = set()
+    for offset in range(0, 20000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": "idol_slug",
+                "hidden": "eq.false",
+                # 同じ列に2つの条件を付けるので and=(...) で渡す
+                "and": f"(event_datetime.gte.{today},event_datetime.lt.{until})",
+                "order": "tweet_id",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        out.update(r["idol_slug"] for r in rows if r.get("idol_slug"))
+        if len(rows) < 1000:
+            break
+    return out
 
 
 def delete_auto_event(tweet_id: str):
