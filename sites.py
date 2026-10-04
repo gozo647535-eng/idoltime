@@ -30,7 +30,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v22"
+PROMPT_VERSION = "v23"  # 本文に無い日付の公演を落とすようにしたので再抽出
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -817,6 +817,38 @@ def stitch_calendar_days(text: str) -> str:
     return "\n".join(lines)
 
 
+def drop_empty_date_lines(text: str) -> str:
+    """中身の無い日付行を落とす。
+
+    日付ごとの一覧になっている予定表では、予定の無い日も日付だけの行として並ぶ。
+    これを残すと LLM が前後の公演をその日に結びつけてしまう。実例として
+    超ときめき♡宣伝部の予定表から、本当は10/05だけの武道館公演が10/05〜10/09の
+    5日間として、10/24だけの有明アリーナ公演が14日間として出力された。
+
+    次の日付行までの間に中身(曜日だけの行を除く)が無い日付行を落とす。
+    """
+    lines = text.split("\n")
+    def is_date(ln):
+        return bool(_PURE_DATE_LINE.match(ln.replace("\t", " ")))
+    def is_filler(ln):
+        t = ln.strip()
+        return not t or _WEEKDAY_LINE.match(t)
+    out = []
+    for i, ln in enumerate(lines):
+        if is_date(ln):
+            has_body = False
+            for nxt in lines[i + 1:]:
+                if is_date(nxt):
+                    break
+                if not is_filler(nxt):
+                    has_body = True
+                    break
+            if not has_body:
+                continue
+        out.append(ln)
+    return "\n".join(out)
+
+
 _EVENT_SIGNAL = re.compile(
     r"(20\d\d[./年]|\d{1,2}\s*[/月]\s*\d{1,2}|\d{1,2}\s*:\s*\d{2}|開演|開場|OPEN|START|"
     r"チケット|ticket|発売|受付|先行|一般販売|一般発売|抽選|先着|"
@@ -1102,17 +1134,90 @@ def extract_events_groq(groq_client, name: str, text: str) -> Optional[List[Site
     return None
 
 
+# 本文に出てくる日付。年つき(2026.10.05 / 2026年10月5日)と年なし(10/5 / 10月5日)の両方
+_TEXT_DATE_FULL = re.compile(r"20(\d\d)\s*[.\-/年]\s*(\d{1,2})\s*[.\-/月]\s*(\d{1,2})")
+# 区切りは広めに採る。ここで拾いすぎても検算が緩くなるだけで、正しい公演は落とさない
+_TEXT_DATE_MD = re.compile(r"(?<!\d)(\d{1,2})\s*[./\-ー月]\s*(\d{1,2})(?!\d)")
+
+
+def dates_in_text(text: str):
+    """本文に実在する (月, 日) の集合。抽出結果の検算に使う。"""
+    out = set()
+    for m in _TEXT_DATE_FULL.finditer(text or ""):
+        out.add((int(m.group(2)), int(m.group(3))))
+    for m in _TEXT_DATE_MD.finditer(text or ""):
+        mo, d = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            out.add((mo, d))
+    return out
+
+
+# 同じ公演名がこの日数以上に増えたら、日付を本文と突き合わせて検算する
+_EXPANDED_EVENT_DAYS = 3
+
+
+def drop_invented_dates(events: List["SiteEvent"], text: str, name: str = ""):
+    """同じ公演が何日にも増やされたとき、本文に無い日付を落とす。
+
+    LLM は公演名と日付の対応を作ってしまうことがある。実例として
+    超ときめき♡宣伝部の公式サイトから、本当は1日(10/05)の武道館公演が
+    10/05〜10/09 の5日間として、10/24 の有明アリーナ公演が14日間として
+    出力された。
+
+    ただし日付の書き方は多様で(「10/4・5」のような連記もある)、本文に無い
+    という理由だけで落とすと正しい公演まで消しかねない。増殖の形になっている
+    公演名(_EXPANDED_EVENT_DAYS 日以上)に限って検算する。
+    ツアーや劇場公演で本当に複数日あるものは、日付が本文に書かれているので残る。
+    """
+    if not events:
+        return events
+    present = dates_in_text(text)
+    if not present:
+        return events  # 日付を1つも読めない本文では検算しない
+    import collections
+    days = collections.Counter(_norm_event_title(e.event_name) for e in events)
+    kept, dropped = [], []
+    for ev in events:
+        md = _event_month_day(ev)
+        expanded = days[_norm_event_title(ev.event_name)] >= _EXPANDED_EVENT_DAYS
+        if md is None or not expanded or md in present:
+            kept.append(ev)
+        else:
+            dropped.append(ev)
+    if dropped:
+        shown = " / ".join(f"{(e.event_datetime or '')[:10]}" for e in dropped[:6])
+        print(f"    本文に無い日付の公演を {len(dropped)} 件落としました: {shown}"
+              + (" ほか" if len(dropped) > 6 else ""))
+    return kept
+
+
+def _norm_event_title(name) -> str:
+    return re.sub(r"[\s　「」『』【】()（）!！?？・,、.。]+", "", (name or "")).lower()
+
+
+def _event_month_day(ev: "SiteEvent"):
+    m = re.match(r"\s*(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", ev.event_datetime or "")
+    if not m:
+        return None
+    return (int(m.group(2)), int(m.group(3)))
+
+
 def extract_events_any(groq_client, gemini_client, name: str, text: str) -> Optional[List[SiteEvent]]:
-    """抽出の統合エントリ。高枠の Groq を優先し、未設定/枠切れ/一時失敗なら Gemini にフォールバック。"""
+    """抽出の統合エントリ。高枠の Groq を優先し、未設定/枠切れ/一時失敗なら Gemini にフォールバック。
+
+    どちらの結果も、本文に無い日付は落としてから返す(LLM が日付を作ってしまう)。
+    """
     if groq_client:
         r = extract_events_groq(groq_client, name, text)
         if r is not None:
-            return r
+            return drop_invented_dates(r, text, name)
         # Groq が枠切れ/一時失敗 → Gemini があれば補完的に試す(無ければ None のまま次回再試行)
         if gemini_client:
-            return extract_events(gemini_client, name, text)
+            r = extract_events(gemini_client, name, text)
+            return None if r is None else drop_invented_dates(r, text, name)
         return None
-    return extract_events(gemini_client, name, text)
+    r = extract_events(gemini_client, name, text)
+    return None if r is None else drop_invented_dates(r, text, name)
 
 
 def extract_events(gemini_client, name: str, text: str) -> Optional[List[SiteEvent]]:
@@ -1328,7 +1433,7 @@ def fetch_site_content(site_url: str):
         # 公演名はページ見出しにしか無いことがある。どのページの記述かを示す行を
         # 付けておくと、名前の無い日付のかたまりにも公演名を与えられる。
         # URL も添えて、公演ごとの案内先をLLMに選ばせる。
-        t = stitch_calendar_days(stitch_split_dates(t))
+        t = drop_empty_date_lines(stitch_calendar_days(stitch_split_dates(t)))
         # 本文に渡すのは見出しだけにする。ページ番号やURLを足して公演ごとの案内先を
         # LLM に答えさせていたが、項目が増えた分だけ出力が長くなり、上限で打ち切られて
         # 取れる公演が激減した(いぎなり東北産が13件→2件)。案内先はリンク文字列と

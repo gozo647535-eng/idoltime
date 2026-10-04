@@ -98,10 +98,15 @@ def fetch_ticketdive(url: str) -> Optional[dict]:
     event = ed.get("event") or {}
     stages = ed.get("stages") or []
     stage = stages[0] if stages else {}
-    venue_obj = stage.get("venue") or {}
-    venue = venue_obj.get("name") or stage.get("stageName") or None
-    if venue and venue_obj.get("address"):
-        venue = f"{venue}({venue_obj['address']})"
+
+    def _stage_venue(st):
+        vo = st.get("venue") or {}
+        v = vo.get("name") or st.get("stageName") or None
+        if v and vo.get("address"):
+            v = f"{v}({vo['address']})"
+        return v
+
+    venue = _stage_venue(stage)
 
     # 開場時刻(あれば)。フィールド名は環境によって異なるため複数候補を見る。
     open_iso = stage.get("openStage") or stage.get("doorOpen") or stage.get("doorOpenAt")
@@ -120,14 +125,20 @@ def fetch_ticketdive(url: str) -> Optional[dict]:
             price_str = f"{price:,}円" if isinstance(price, (int, float)) else (str(price) if price else "")
             ticket_types.append({"name": name, "price": price_str})
 
-    # 複数日開催の場合、各ステージ(DAY1/DAY2…)の日付と出演者一覧
+    # 複数日開催の場合、各ステージ(DAY1/DAY2…)の日付・会場・出演者一覧。
+    # ツアーは日付ごとに会場が違う(フルコースの「Bon Voyage」は仙台Rensa→大阪
+    # ESAKA MUSE→福岡BEAT STATION…)ため、会場も日付ごとに持つ。
     day_stages = []
     for st in stages:
         dt = _iso_to_jst(st.get("startStage"), with_time=False)
         date = dt[:10] if dt else None
         if date:
+            open_iso_st = st.get("openStage") or st.get("doorOpen") or st.get("doorOpenAt")
+            open_dt_st = _iso_to_jst(open_iso_st, with_time=True)
             day_stages.append({
                 "date": date,
+                "venue": _stage_venue(st),
+                "open_time": open_dt_st[11:16] if open_dt_st else None,
                 "artists": [a.get("name") for a in (st.get("artists") or []) if a.get("name")],
             })
 
@@ -143,6 +154,31 @@ def fetch_ticketdive(url: str) -> Optional[dict]:
         "artists": [a.get("name") for a in (stage.get("artists") or []) if a.get("name")],
         "day_stages": day_stages,
     }
+
+
+def venue_by_date(day_stages):
+    """日付 → 会場名。同じ日に複数会場があればスラッシュで並べる(サーキット)。"""
+    out = {}
+    for ds in day_stages or []:
+        d, v = ds.get("date"), ds.get("venue")
+        if not d or not v:
+            continue
+        cur = out.get(d)
+        if not cur:
+            out[d] = v
+        elif v not in cur.split(" / "):
+            out[d] = f"{cur} / {v}"
+    return out
+
+
+def open_time_by_date(day_stages):
+    """日付 → 開場時刻。同じ日に複数回あれば最も早いもの。"""
+    out = {}
+    for ds in day_stages or []:
+        d, t = ds.get("date"), ds.get("open_time")
+        if d and t and (d not in out or t < out[d]):
+            out[d] = t
+    return out
 
 
 def festival_key(url: str) -> str:

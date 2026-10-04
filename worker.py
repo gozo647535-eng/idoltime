@@ -402,12 +402,19 @@ def expand_timetree_row(row: dict, idol_name: str):
         return [row]
     fk = ticketdive.festival_key(url)
     name = info.get("event_name") or _UNDECIDED_RE.sub("", row.get("event_name") or "").strip()
+    # ツアーは日付ごとに会場が違うので、日付に対応する会場を入れる
+    venues = ticketdive.venue_by_date(day_stages)
+    opens = ticketdive.open_time_by_date(day_stages)
     out = []
     for dt in days:
         r = dict(row)
         r["ticket_types"] = list(row.get("ticket_types") or [])
         r["event_name"] = name
         r["event_datetime"] = dt
+        if venues.get(dt):
+            r["other_details"] = clean_venue(venues[dt])
+        if opens.get(dt):
+            r["open_time"] = opens[dt]
         # フェス識別子+日付でIDを作る → 同一フェスの複数TimeTree投稿でも1日1行に集約
         r["tweet_id"] = f"tt:{row['idol_slug']}:tdf:{fk}:{dt.replace('-', '')}"
         out.append(r)
@@ -1622,20 +1629,27 @@ def _event_key(source: str, url: str) -> str:
 
 
 def _build_yrt_row(slug: str, source: str, url: str, info: dict, dt: str, multi_day: bool) -> dict:
+    # ツアーは日付ごとに会場が違うので、その日の会場を使う(無ければ代表会場)
+    venue = info.get("venue")
+    open_time = info.get("open_time")
+    if multi_day:
+        day_stages = info.get("day_stages") or []
+        venue = ticketdive.venue_by_date(day_stages).get(dt) or venue
+        open_time = ticketdive.open_time_by_date(day_stages).get(dt) or open_time
     return {
         "tweet_id": f"yrt:{slug}:{_event_key(source, url)}:{dt.replace('-', '')}",
         "idol_slug": slug,
         "account": None,
         "event_name": info.get("event_name"),
         "event_datetime": dt if multi_day else normalize_event_datetime(info.get("event_datetime")),
-        "open_time": info.get("open_time"),
+        "open_time": open_time,
         "entry_time": None,
         "sale_datetime": to_timestamptz(info.get("sale_datetime")),
         "is_first_come": bool(info.get("is_first_come")),
         "ticket_url": url,
         "ticket_types": info.get("ticket_types") or [],
         "max_tickets": None,
-        "other_details": clean_venue(info.get("venue")),
+        "other_details": clean_venue(venue),
         "raw_text": None,
         "tweet_url": url,
     }
