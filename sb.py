@@ -1,3 +1,38 @@
+def get_yrt_event_urls(today: str):
+    """今後の yrt 行が指しているチケットページURLの一覧(重複なし)。
+
+    Yahoo!リアルタイム検索は最近の投稿しか返さないため、一度取り込んだ
+    イベントのページは二度と読み直されない。販売元がページを直したとき
+    (ツアーの会場が日程ごとに入るなど)に古いままになるので、保存済みの
+    URLを少しずつ読み直すために使う。
+    """
+    out = []
+    seen = set()
+    for offset in range(0, 20000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": "ticket_url",
+                "hidden": "eq.false",
+                "tweet_id": "like.yrt:*",
+                "event_datetime": f"gte.{today}",
+                "order": "tweet_id",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        for r in rows:
+            u = r.get("ticket_url")
+            if u and u not in seen:
+                seen.add(u)
+                out.append(u)
+        if len(rows) < 1000:
+            break
+    return out
+
+
 def get_next_event_dates(today: str):
     """idol_slug → 次の出演予定日(today以降で最も早い日) を返す。
 

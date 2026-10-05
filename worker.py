@@ -1675,6 +1675,47 @@ def _yrt_cache_key(source: str, url: str) -> str:
     return f"yrtu:{source}:{_event_key(source, url)}"
 
 
+# 1回の巡回で読み直す、取り込み済みイベントページの上限
+YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT", "40"))
+
+
+def _source_of_url(url: str):
+    if ticketdive.is_ticketdive_url(url):
+        return "ticketdive"
+    if "livepocket.jp" in url:
+        return "livepocket"
+    if "tiget.net" in url:
+        return "tiget"
+    return None
+
+
+def _add_stored_yrt_urls(by_site: dict) -> int:
+    """保存済みの yrt 行が指すイベントページを、今回の取得対象に足す。
+
+    当日の取得済みキャッシュは残すので、同じ日に2回読むことはない。
+    毎回同じURLに偏らないよう、最後に読んだ日が古いものから選ぶ。
+    """
+    try:
+        urls = sb.get_yrt_event_urls(datetime.datetime.now(JST).strftime("%Y-%m-%d"))
+    except Exception as e:
+        print(f"  取り込み済みURLの取得に失敗(読み直しは行いません): {e}")
+        return 0
+    if not urls:
+        return 0
+    try:
+        last = sb.get_last_seen_by_prefix("yrtu:")
+    except Exception:
+        last = {}
+    known = {u for v in by_site.values() for u in v}
+    cand = [u for u in urls if u not in known and _source_of_url(u)]
+    cand.sort(key=lambda u: last.get(_yrt_cache_key(_source_of_url(u), u)) or "")
+    added = 0
+    for u in cand[:YRT_REFRESH_LIMIT]:
+        by_site.setdefault(_source_of_url(u), []).append(u)
+        added += 1
+    return added
+
+
 def run_yahoo_rt(discover_sites: bool = True) -> int:
     """Yahoo! リアルタイム検索で X 上のチケットサイト(TicketDive / LivePocket / TiGET)の
     リンクを発見し、出演者が図鑑の登録グループと一致するイベントを取り込む。
@@ -1695,11 +1736,18 @@ def run_yahoo_rt(discover_sites: bool = True) -> int:
     # キャッシュで省かれるので、2回目以降の取得コストは増えない)。
     by_site = yahoo_rt.collect_event_urls(queries, limit_per_site=150,
                                           other_urls=other_urls)
+    # 取り込み済みのイベントページを少しずつ読み直す。リアルタイム検索は最近の
+    # 投稿しか返さないので、一度取り込んだページは放っておくと二度と読まれず、
+    # 販売元がページを直しても古いままになる(ツアーの会場が日程ごとに入った
+    # フルコース「Bon Voyage」で、古い行だけ全日程が仙台Rensaのまま残った)。
+    refreshed = _add_stored_yrt_urls(by_site)
+
     total_urls = sum(len(v) for v in by_site.values())
     if not total_urls:
         print("Yahooリアルタイム: チケットサイトのリンクは見つかりませんでした。")
         return 0
-    print("Yahooリアルタイム: " + " / ".join(f"{k} {len(v)}件" for k, v in by_site.items()))
+    print("Yahooリアルタイム: " + " / ".join(f"{k} {len(v)}件" for k, v in by_site.items())
+          + (f" / 取り込み済みの読み直し {refreshed}件" if refreshed else ""))
 
     total = 0
     touched = set()
