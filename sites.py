@@ -30,7 +30,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v23"  # 本文に無い日付の公演を落とすようにしたので再抽出
+PROMPT_VERSION = "v24"  # 凝縮後に日付行の対応を直したので再抽出
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -972,7 +972,27 @@ def _condense_for_llm(text: str, limit: int = 2200) -> str:
     # ④ 余力で残りのイベント行
     for b in blocks:
         take(b)
-    return "\n".join(lines[i] for i in sorted(picked))
+
+    # 残した行には、その行がぶら下がっている日付行を必ず添える。
+    # かたまりは独立に選ばれるため、公演名のかたまりだけが残って日付行が落ちると、
+    # 前に出てくる別の日付にぶら下がって見える(「GFEST.2026」が10/10から10/09に
+    # ずれた)。日付行は短いので、足しても字数はほとんど増えない。
+    owner = {}
+    cur_date = None
+    for i, ln in enumerate(lines):
+        if ln.startswith(PAGE_MARK):
+            cur_date = None
+        elif _PURE_DATE_LINE.match(ln):
+            cur_date = i
+        owner[i] = cur_date
+    for i in sorted(picked):
+        d = owner.get(i)
+        if d is not None:
+            picked.add(d)
+
+    # 中身が1行も残らなかった日付行は落とす(残すと LLM が前後の公演を
+    # その日に結びつけてしまう)
+    return drop_empty_date_lines("\n".join(lines[i] for i in sorted(picked)))
 
 
 def _build_extract_prompt(name: str, text: str, today: str) -> str:
