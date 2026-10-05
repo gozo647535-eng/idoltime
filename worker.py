@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import re
+import unicodedata
 import traceback
 import urllib.parse
 from typing import List, Optional
@@ -633,6 +634,14 @@ _GENERIC_HEADING = re.compile(
     re.IGNORECASE)
 
 
+# 行IDに使う公演名。囲み記号・空白・全半角の違いを無視する
+_ID_NAME_STRIP = re.compile(r"[\s　「」『』\"'“”‘’【】\[\]()（）〈〉《》!！?？・,、.。:：;；~〜\-–—_]+")
+
+
+def _id_name(name) -> str:
+    return _ID_NAME_STRIP.sub("", unicodedata.normalize("NFKC", name or "")).lower()
+
+
 def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None,
                    anchors=None) -> Optional[dict]:
     """公式サイト由来の SiteEvent を auto_events 行に変換。tweet_id は合成した安定IDで重複排除。
@@ -656,8 +665,12 @@ def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None,
         sale = to_timestamptz(normalize_datetime_string(ev.sale_datetime) or ev.sale_datetime)
     event_dt = normalize_event_datetime(ev.event_datetime)
     sale = _sane_sale_datetime(sale, event_dt, ev.event_name)
+    # IDは公演名の表記揺れに強くする。LLM は同じ公演を回ごとに「…」/『…』と
+    # 書き分けるため、生の文字列で作ると毎回別の行になり、古い行が残ったまま
+    # 新しい行が増え続ける(超ときめき♡宣伝部で7件→13件になった)。
+    # 発売日時も鍵に入れない(あとから発売日が決まっただけで別の行にしない)。
     key = hashlib.sha1(
-        f"{slug}|{ev.event_name}|{ev.event_datetime}|{ev.sale_datetime}".encode("utf-8")
+        f"{slug}|{_id_name(ev.event_name)}|{(event_dt or '')[:10]}".encode("utf-8")
     ).hexdigest()[:20]
     return {
         "tweet_id": f"site:{slug}:{key}",
