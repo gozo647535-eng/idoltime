@@ -1135,8 +1135,11 @@ def run_sites() -> int:
             print("  変更なし。スキップ")
             processed.append(slug)
             continue
-        retry_zero = seen == f"{content_hash}|z1"
-        retry_low = seen == f"{content_hash}|low"
+        # 再取得の印は内容ハッシュに紐づけない。ニュース欄の更新などで本文が数文字
+        # 変わるだけで「前回見送った」と分からなくなり、見送りを繰り返したまま
+        # 新しい行だけが増え続けてしまう(超ときめき♡宣伝部で20件→30件になった)。
+        retry_zero = bool(seen) and seen.endswith("|z1")
+        retry_low = bool(seen) and seen.endswith("|low")
         if retry_zero:
             print("  前回0件だったため再抽出します")
         if retry_low:
