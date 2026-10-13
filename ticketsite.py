@@ -314,3 +314,60 @@ def fetch_event(url: str) -> Optional[dict]:
         "act_text": act_text,
         "act_labeled": act_labeled,
     }
+
+# LivePocket の「ファン・アイドル」カテゴリを公開日が新しい順に並べた一覧。
+# X への投稿を待たずに、公開された時点で発売を拾うために使う。
+LIVEPOCKET_IDOL_LIST = (
+    "https://livepocket.jp/event/search"
+    "?l_cat=%E3%83%95%E3%82%A1%E3%83%B3%E3%83%BB%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB&sort=3"
+)
+
+_CARD_SPLIT = re.compile(r'<li class="event-card-list__item">')
+_CARD_HREF = re.compile(r'href="(/e/[^"]+)"')
+_CARD_TAG = re.compile(r'class="[^"]*event-card__tag[^"]*">([^<]+)<')
+_CARD_TITLE = re.compile(r'class="event-card__title">(.*?)</h3>', re.S)
+# 「<span class="event-card__place">会場</span> 新宿MARZ（東京都）」の後ろ側
+_CARD_FIELD = {
+    "date": re.compile(r'class="event-card__date">[^<]*</span>(.*?)</p>', re.S),
+    "venue": re.compile(r'class="event-card__place">[^<]*</span>(.*?)</p>', re.S),
+    "cast": re.compile(r'class="event-card__cast">[^<]*</span>(.*?)</p>', re.S),
+}
+
+
+def _card_text(block: str, pat) -> str:
+    m = pat.search(block)
+    if not m:
+        return ""
+    return _html.unescape(re.sub(r"<[^>]+>", " ", m.group(1))).strip()
+
+
+def livepocket_listing(pages: int = 3):
+    """アイドルカテゴリの新着一覧を読み、カードの内容をそのまま返す。
+
+    一覧に「販売前」の表示と出演者が載っているので、ここで絞ってから
+    イベントページを取りに行けば、無駄な取得をほとんどせずに済む。
+    返り値: [{url, status, name, date, venue, performers[]}]
+    """
+    out = []
+    for page in range(1, max(1, pages) + 1):
+        url = LIVEPOCKET_IDOL_LIST + (f"&page={page}" if page > 1 else "")
+        html = _get(url)
+        if not html:
+            break
+        blocks = _CARD_SPLIT.split(html)[1:]
+        if not blocks:
+            break
+        for b in blocks:
+            m = _CARD_HREF.search(b)
+            if not m:
+                continue
+            cast = _card_text(b, _CARD_FIELD["cast"])
+            out.append({
+                "url": "https://livepocket.jp" + m.group(1),
+                "status": _card_text(b, _CARD_TAG),
+                "name": _card_text(b, _CARD_TITLE),
+                "date": _card_text(b, _CARD_FIELD["date"]),
+                "venue": _card_text(b, _CARD_FIELD["venue"]),
+                "performers": _split_performers(cast),
+            })
+    return out

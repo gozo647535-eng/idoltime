@@ -32,6 +32,10 @@ on:
         description: "Googleカレンダーの取り込みのみ実行(1分ほど。カレンダーを登録した直後の確認用)"
         type: boolean
         default: false
+      livepocket_only:
+        description: "LivePocketの新着一覧のみ巡回(数分。先着の取り込み確認用)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ingest
@@ -86,6 +90,7 @@ jobs:
           SITE_ONLY: ${{ github.event.inputs.site_only }}
           SITE_SLUGS: ${{ github.event.inputs.site_slugs }}
           GCAL_ONLY: ${{ github.event.inputs.gcal_only }}
+          LIVEPOCKET_ONLY: ${{ github.event.inputs.livepocket_only }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}
           X_EMAIL: ${{ secrets.X_EMAIL }}

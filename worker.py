@@ -1691,6 +1691,12 @@ def _yrt_cache_key(source: str, url: str) -> str:
     return f"yrtu:{source}:{_event_key(source, url)}"
 
 
+# LivePocket の新着一覧を何ページ読むか(1ページ20件)。公開日が新しい順なので
+# 前回の巡回以降に公開されたぶんが入っていればよい。
+LIVEPOCKET_PAGES = int(os.environ.get("LIVEPOCKET_PAGES", "3"))
+# そのうち実際にイベントページを取りに行く上限
+LIVEPOCKET_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_FETCH_LIMIT", "25"))
+
 # 1回の巡回で読み直す、取り込み済みイベントページの上限
 YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT", "40"))
 
@@ -1732,6 +1738,84 @@ def _add_stored_yrt_urls(by_site: dict) -> int:
     return added
 
 
+def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
+    """チケットページ1件を読み、出演する登録グループぶんの行を書く。
+
+    返り値 (書いた行数, 当日取得済みでスキップしたか)。
+    同じイベントは何度も出回るので、当日すでに取り込んだURLは再取得しない
+    (高頻度実行でも相手サイトへの負荷と実行時間を増やさないため)。
+    """
+    cache_key = _yrt_cache_key(source, url)
+    try:
+        if sb.get_last_seen(cache_key) == today:
+            return 0, True
+    except Exception:
+        pass
+    info = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
+    if not info:
+        return 0, False
+    try:
+        sb.set_last_seen(cache_key, today)
+    except Exception:
+        pass
+    batch = []
+    for idol in idols:
+        name, slug = idol["name"], idol["idol_slug"]
+        dates, multi_day = _match_dates(source, info, name, today)
+        for dt in dates:
+            if not dt or dt < today:
+                continue  # 終了済みの公演は取り込まない
+            batch.append(_build_yrt_row(slug, source, url, info, dt, multi_day))
+            touched.add(slug)
+            print(f"  → [{source}] {name}: {info.get('event_name')} ({dt})")
+    # フェス1本で100組を超えることがあるので、1行ずつではなくまとめて書く
+    try:
+        sb.upsert_auto_events(batch)
+        return len(batch), False
+    except Exception as e:
+        print(f"  書き込み失敗({len(batch)}件): {e}")
+        return 0, False
+
+
+def run_livepocket() -> int:
+    """LivePocket のアイドルカテゴリ新着一覧から、まだ発売前のものを取り込む。
+
+    Yahoo!リアルタイム検索は X への投稿を拾う仕組みなので、投稿が無いイベントや
+    投稿が発売直前のイベントは間に合わない。一覧を直接見れば公開された時点で拾える。
+
+    一覧に「販売前」の表示と出演者が載っているため、登録グループが出る販売前の
+    ものだけに絞ってからイベントページを取りに行く(無駄な取得をしない)。
+    """
+    try:
+        cards = ticketsite.livepocket_listing(pages=LIVEPOCKET_PAGES)
+    except Exception as e:
+        print(f"LivePocket の一覧を取得できません: {e}")
+        return 0
+    if not cards:
+        print("LivePocket の一覧からイベントを取れませんでした。")
+        return 0
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    idols = build_idol_name_list()
+    lineup_idx = lineup.build_index(idols)
+    pre = [c for c in cards if c["status"] == "販売前"]
+    # 一覧の出演者欄で登録グループに当たるものだけを対象にする
+    targets = []
+    for c in pre:
+        text = f"{c['name']}\n{' / '.join(c['performers'])}"
+        if lineup.names_in_text(text, lineup_idx):
+            targets.append(c)
+    print(f"LivePocket 新着一覧: {len(cards)} 件 / 販売前 {len(pre)} 件 / "
+          f"登録グループが出る {len(targets)} 件")
+    total = 0
+    touched = set()
+    for c in targets[:LIVEPOCKET_FETCH_LIMIT]:
+        added, _ = _ingest_sale_url("livepocket", c["url"], idols, today, touched)
+        total += added
+    removed = sum(_cleanup_past_yrt(slug, today) for slug in touched)
+    print(f"LivePocket 取り込み完了: 合計 {total} 件 / 過去分 {removed} 件削除")
+    return total
+
+
 def run_yahoo_rt(discover_sites: bool = True) -> int:
     """Yahoo! リアルタイム検索で X 上のチケットサイト(TicketDive / LivePocket / TiGET)の
     リンクを発見し、出演者が図鑑の登録グループと一致するイベントを取り込む。
@@ -1770,38 +1854,9 @@ def run_yahoo_rt(discover_sites: bool = True) -> int:
     skipped = 0
     for source, urls in by_site.items():
         for url in urls:
-            # 同じイベントは何度も出回るので、当日すでに取り込んだURLは再取得しない
-            # (高頻度実行でも相手サイトへの負荷と実行時間を増やさないため)
-            cache_key = _yrt_cache_key(source, url)
-            try:
-                if sb.get_last_seen(cache_key) == today:
-                    skipped += 1
-                    continue
-            except Exception:
-                pass
-            info = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
-            if not info:
-                continue
-            try:
-                sb.set_last_seen(cache_key, today)
-            except Exception:
-                pass
-            batch = []
-            for idol in idols:
-                name, slug = idol["name"], idol["idol_slug"]
-                dates, multi_day = _match_dates(source, info, name, today)
-                for dt in dates:
-                    if not dt or dt < today:
-                        continue  # 終了済みの公演は取り込まない
-                    batch.append(_build_yrt_row(slug, source, url, info, dt, multi_day))
-                    touched.add(slug)
-                    print(f"  → [{source}] {name}: {info.get('event_name')} ({dt})")
-            # フェス1本で100組を超えることがあるので、1行ずつではなくまとめて書く
-            try:
-                sb.upsert_auto_events(batch)
-                total += len(batch)
-            except Exception as e:
-                print(f"  書き込み失敗({len(batch)}件): {e}")
+            added, was_skipped = _ingest_sale_url(source, url, idols, today, touched)
+            total += added
+            skipped += 1 if was_skipped else 0
 
     # 公式サイトの発見は候補ごとに取得が入るので1日1回(フル巡回)だけにする。
     # 発見のみモードは1日3回あり、ここを足すと無料枠(2,000分/月)を超えてしまう。
@@ -2037,6 +2092,9 @@ def main() -> int:
     if os.environ.get("GCAL_ONLY", "").lower() == "true":
         run_gcal()
         return 0
+    if os.environ.get("LIVEPOCKET_ONLY", "").lower() == "true":
+        run_livepocket()
+        return 0
     if not x_only:
         run_sites()
         run_timetree()
@@ -2044,6 +2102,7 @@ def main() -> int:
         run_eplus()
         run_curated()
         run_yahoo_rt()
+        run_livepocket()
         cleanup_orphan_rows()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())
