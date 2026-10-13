@@ -1698,7 +1698,7 @@ LIVEPOCKET_PAGES = int(os.environ.get("LIVEPOCKET_PAGES", "3"))
 LIVEPOCKET_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_FETCH_LIMIT", "25"))
 
 # 1回の巡回で読み直す、取り込み済みイベントページの上限
-YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT", "40"))
+YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT", "60"))
 
 
 def _source_of_url(url: str):
@@ -1712,13 +1712,16 @@ def _source_of_url(url: str):
 
 
 def _add_stored_yrt_urls(by_site: dict) -> int:
-    """保存済みの yrt 行が指すイベントページを、今回の取得対象に足す。
+    """保存済みの yrt 行が指すチケットページを、今回の取得対象に足す。
 
     当日の取得済みキャッシュは残すので、同じ日に2回読むことはない。
     毎回同じURLに偏らないよう、最後に読んだ日が古いものから選ぶ。
     """
+    today_str = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     try:
-        urls = sb.get_yrt_event_urls(datetime.datetime.now(JST).strftime("%Y-%m-%d"))
+        urls = list(dict.fromkeys(
+            r["ticket_url"] for r in sb.get_ticket_page_rows(today_str, prefix="yrt:")
+            if r.get("ticket_url")))
     except Exception as e:
         print(f"  取り込み済みURLの取得に失敗(読み直しは行いません): {e}")
         return 0
@@ -1998,6 +2001,76 @@ def _ttx_source_slug(tweet_id: str, idol_slug: str) -> Optional[str]:
     return parts[0] if len(parts) == 3 else None
 
 
+# 1回の巡回で発売情報を入れ直すチケットページの上限
+SALE_REFRESH_LIMIT = int(os.environ.get("SALE_REFRESH_LIMIT", "40"))
+
+
+def refresh_sale_info() -> int:
+    """カレンダー由来の行に、販売ページから発売日時・先着・券種を入れる。
+
+    TimeTree のノートや Googleカレンダーには「いつ発売か」が書かれていない
+    ので、リンクだけがある行は先着の一覧に出せない(今後の行が指す対応サイトの
+    URL471件のうち、発売情報を持つのは Yahoo!リアルタイム検索から入った48件
+    だけだった)。ここでは行を増やさず、同じURLを指す行の発売情報だけを
+    書き足す。公演名や会場はカレンダー側のほうが実態に合うので触らない
+    (行を増やすと同じ公演の枠が2つ出てしまう)。
+
+    発売情報がまだ無いURLを優先し、最後に読んだ日が古い順に少しずつ読む。
+    """
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    try:
+        rows = sb.get_ticket_page_rows(today)
+    except Exception as e:
+        print(f"  発売情報の入れ直しに失敗(行の取得): {e}")
+        return 0
+    by_url: dict = {}
+    for r in rows:
+        url = r.get("ticket_url")
+        if not url or r["tweet_id"].startswith("yrt:") or not _source_of_url(url):
+            continue  # yrt 行は通常の取り込みで最新になる
+        by_url.setdefault(url, []).append(r)
+    if not by_url:
+        return 0
+    try:
+        last = sb.get_last_seen_by_prefix("sale:")
+    except Exception:
+        last = {}
+    # 発売情報がまだ無いものを先に、その中では読んだ日が古い順に
+    cand = sorted(
+        by_url,
+        key=lambda u: (all(r.get("sale_datetime") for r in by_url[u]),
+                       last.get(f"sale:{u}") or ""),
+    )
+    filled = 0
+    for url in cand[:SALE_REFRESH_LIMIT]:
+        if last.get(f"sale:{url}") == today:
+            continue
+        source = _source_of_url(url)
+        info = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
+        try:
+            sb.set_last_seen(f"sale:{url}", today)
+        except Exception:
+            pass
+        if not info:
+            continue
+        patch = {
+            "sale_datetime": to_timestamptz(info.get("sale_datetime")),
+            "is_first_come": bool(info.get("is_first_come")),
+            "ticket_types": info.get("ticket_types") or [],
+        }
+        if not patch["sale_datetime"]:
+            continue  # 発売日時が取れないなら上書きしない
+        for r in by_url[url]:
+            try:
+                sb.patch_auto_event(r["tweet_id"], patch)
+                filled += 1
+            except Exception as e:
+                print(f"  発売情報の書き込みに失敗 {r['tweet_id'][:40]}: {e}")
+    if filled:
+        print(f"発売情報を入れ直し: {filled} 行 / 読んだページ {min(len(cand), SALE_REFRESH_LIMIT)} 件")
+    return filled
+
+
 def fix_ticket_urls() -> int:
     """保存済みの ticket_url に混ざったゴミを落とす。
 
@@ -2119,6 +2192,7 @@ def main() -> int:
     discovery_only = os.environ.get("DISCOVERY_ONLY", "").lower() == "true"
     if discovery_only:
         run_yahoo_rt(discover_sites=False)
+        refresh_sale_info()
         # URLの修復は1回洗えば終わりだが、点検自体は数回の読み取りで済むので
         # 軽量モードでも回す(新しく混ざった分をその日のうちに直せる)。
         fix_ticket_urls()
@@ -2150,6 +2224,7 @@ def main() -> int:
         run_curated()
         run_yahoo_rt()
         run_livepocket()
+        refresh_sale_info()
         fix_ticket_urls()
         cleanup_orphan_rows()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":

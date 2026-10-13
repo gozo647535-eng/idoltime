@@ -181,6 +181,18 @@ def _host(url: str) -> str:
         return ""
 
 
+def _error_body(e) -> str:
+    try:
+        data = e.read()
+    except Exception:
+        return ""
+    try:
+        data = gzip.decompress(data)
+    except Exception:
+        pass
+    return data.decode("utf-8", "replace")
+
+
 def _http_get(url: str, timeout: int = 20) -> Optional[str]:
     try:
         _pace()
@@ -196,8 +208,10 @@ def _http_get(url: str, timeout: int = 20) -> Optional[str]:
             data = gzip.decompress(data)
         return data.decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        if e.code in (403, 429):
-            # ボット対策は認証ページだけでなく、403/429 で突き返す形でも出る
+        # ボット対策は認証ページだけでなく、403 で突き返す形でも出る。
+        # ただし 403 は「不正なリクエスト」の静的ページ(t.livepocket.jp の
+        # 古いURL)でも返るので、中身を見て分けないとブラウザを無駄に使う。
+        if e.code == 429 or (e.code == 403 and bot_wall(_error_body(e))):
             print(f"    HTTP {e.code} で断られました(ブラウザで開き直します): {url[:70]}")
             return _BLOCKED
         print(f"    チケットサイト取得失敗 {url}: {e}")

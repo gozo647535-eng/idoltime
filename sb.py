@@ -1,33 +1,27 @@
-def get_yrt_event_urls(today: str):
-    """今後の yrt 行が指しているチケットページURLの一覧(重複なし)。
+def get_ticket_page_rows(today: str, prefix: str = None):
+    """今後の行の {tweet_id, ticket_url, sale_datetime} を返す(ticket_url がある行だけ)。
 
-    Yahoo!リアルタイム検索は最近の投稿しか返さないため、一度取り込んだ
-    イベントのページは二度と読み直されない。販売元がページを直したとき
-    (ツアーの会場が日程ごとに入るなど)に古いままになるので、保存済みの
-    URLを少しずつ読み直すために使う。
+    prefix を渡すとその取り込み元に絞る(例: "yrt:")。
+    TimeTree のノートや Googleカレンダーから拾ったリンクには発売日時・券種・
+    先着かどうかが入らない(カレンダーに書かれていない)ため、販売ページを
+    読んで後から入れるのに使う。実測(2026-10-13): 今後の行が指す対応サイトの
+    URLは471件で、Yahoo!リアルタイム検索から入ったものは48件だけだった。
     """
+    params = {
+        "select": "tweet_id,ticket_url,sale_datetime",
+        "hidden": "eq.false",
+        "ticket_url": "not.is.null",
+        "event_datetime": f"gte.{today}",
+        "order": "tweet_id",
+        "limit": 1000,
+    }
+    if prefix:
+        params["tweet_id"] = f"like.{prefix}*"
     out = []
-    seen = set()
     for offset in range(0, 20000, 1000):
-        _, rows = _request(
-            "GET",
-            "auto_events",
-            params={
-                "select": "ticket_url",
-                "hidden": "eq.false",
-                "tweet_id": "like.yrt:*",
-                "event_datetime": f"gte.{today}",
-                "order": "tweet_id",
-                "limit": 1000,
-                "offset": offset,
-            },
-        )
+        _, rows = _request("GET", "auto_events", params={**params, "offset": offset})
         rows = rows or []
-        for r in rows:
-            u = r.get("ticket_url")
-            if u and u not in seen:
-                seen.add(u)
-                out.append(u)
+        out += rows
         if len(rows) < 1000:
             break
     return out
