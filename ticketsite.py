@@ -12,8 +12,10 @@
 """
 import gzip
 import html as _html
+import os
 import re
 import time
+import urllib.parse
 import urllib.request
 from typing import List, Optional
 
@@ -69,7 +71,7 @@ class _Browser:
     取得件数も _MAX_PAGES までに抑える。
     """
 
-    _MAX_PAGES = 30
+    _MAX_PAGES = int(os.environ.get("BROWSER_PAGE_LIMIT", "40"))
 
     def __init__(self):
         self._pw = None
@@ -125,10 +127,22 @@ class _Browser:
             if bot_wall(html):
                 print(f"    ボット対策を通過できません: {url[:70]}")
                 return None
+            self._save_cookies(url)
             return html
         except Exception as e:
             print(f"    ブラウザでの取得に失敗: {type(e).__name__} {str(e)[:70]} / {url[:60]}")
             return None
+
+    def _save_cookies(self, url: str) -> None:
+        """認証を通ったクッキーを素の HTTP 取得にも渡す。
+        これで2ページ目以降はブラウザを起動せずに取れる(取得も速い)。"""
+        try:
+            jar = self._page.context.cookies()
+        except Exception:
+            return
+        pairs = "; ".join(f"{c['name']}={c['value']}" for c in jar if c.get("name"))
+        if pairs:
+            _COOKIES[_host(url)] = pairs
 
     def close(self) -> None:
         for obj in (self._browser, self._pw):
@@ -150,11 +164,27 @@ def close_browser() -> None:
     _BROWSER.close()
 
 
+# 認証を通ったブラウザのクッキー(ホストごと)。これを素の HTTP 取得にも
+# 付けることで、2ページ目以降はブラウザを使わずに済む
+_COOKIES: dict = {}
+
+
+def _host(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).netloc
+    except Exception:
+        return ""
+
+
 def _http_get(url: str, timeout: int = 20) -> Optional[str]:
     try:
         _pace()
-        req = urllib.request.Request(url, headers={
-            "User-Agent": UA, "Accept-Encoding": "gzip", "Accept-Language": "ja,en;q=0.8"})
+        headers = {
+            "User-Agent": UA, "Accept-Encoding": "gzip", "Accept-Language": "ja,en;q=0.8"}
+        cookie = _COOKIES.get(_host(url))
+        if cookie:
+            headers["Cookie"] = cookie
+        req = urllib.request.Request(url, headers=headers)
         r = urllib.request.urlopen(req, timeout=timeout)
         data = r.read()
         if r.headers.get("Content-Encoding") == "gzip":
@@ -469,7 +499,7 @@ def _get_listing(url: str, timeout: int = 25):
     """一覧ページを取る。実行環境によって中身が空で返ることがあるので、
     何が返ってきたかを必ず残す(本文が空だと例外にならず、原因が分からない)。"""
     _pace()
-    req = urllib.request.Request(url, headers={
+    headers = {
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
@@ -480,7 +510,11 @@ def _get_listing(url: str, timeout: int = 25):
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
-    })
+    }
+    cookie = _COOKIES.get(_host(url))
+    if cookie:
+        headers["Cookie"] = cookie
+    req = urllib.request.Request(url, headers=headers)
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
         data = r.read()
