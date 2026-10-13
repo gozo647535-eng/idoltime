@@ -411,3 +411,30 @@ def livepocket_listing(pages: int = 3):
                 "performers": _split_performers(cast),
             })
     return out
+
+# TiGET のアイドルカテゴリ一覧(categories=29)
+TIGET_IDOL_LIST = "https://tiget.net/events?categories=29"
+
+
+def listing_check(urls=None):
+    """一覧ページに実行環境からアクセスできるかを調べて表示する。
+
+    LivePocket の一覧は AWS WAF のボット対策で、データセンターからは
+    認証ページが返る。他サイトも同じ扱いかどうかは実際に取ってみないと
+    分からないので、手を入れる前にこれで確かめる。
+    """
+    for url in urls or [TIGET_IDOL_LIST, LIVEPOCKET_IDOL_LIST]:
+        html = _get_listing(url)
+        if html is None:
+            print(f"  取得できません: {url[:70]}")
+            continue
+        title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+        title = _html.unescape(title.group(1)).strip()[:48] if title else "なし"
+        waf = "awsWafCookieDomainList" in html or "gokuProps" in html
+        events = len(set(re.findall(r"/events/\d+|/e/[A-Za-z0-9_-]+", html)))
+        head = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html[:300])).strip()
+        print(f"  {url[:60]}")
+        print(f"    {len(html)}字 / title={title} / ボット対策={'あり' if waf else 'なし'}"
+              f" / イベントURL {events}件")
+        if waf or events == 0:
+            print(f"    冒頭: {head[:110]}")

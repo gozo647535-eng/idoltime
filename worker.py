@@ -2106,6 +2106,11 @@ def main() -> int:
     if os.environ.get("LIVEPOCKET_ONLY", "").lower() == "true":
         run_livepocket()
         return 0
+    # 一覧ページに実行環境からアクセスできるかの確認だけを行う(数秒)
+    if os.environ.get("LISTING_CHECK", "").lower() == "true":
+        print("チケットサイトの一覧ページを確認します")
+        ticketsite.listing_check()
+        return 0
     if not x_only:
         run_sites()
         run_timetree()

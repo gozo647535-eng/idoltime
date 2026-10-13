@@ -36,6 +36,10 @@ on:
         description: "LivePocketの新着一覧のみ巡回(数分。先着の取り込み確認用)"
         type: boolean
         default: false
+      listing_check:
+        description: "チケットサイトの一覧ページに到達できるかだけ確認(数秒)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ingest
@@ -91,6 +95,7 @@ jobs:
           SITE_SLUGS: ${{ github.event.inputs.site_slugs }}
           GCAL_ONLY: ${{ github.event.inputs.gcal_only }}
           LIVEPOCKET_ONLY: ${{ github.event.inputs.livepocket_only }}
+          LISTING_CHECK: ${{ github.event.inputs.listing_check }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}
           X_EMAIL: ${{ secrets.X_EMAIL }}
