@@ -341,6 +341,35 @@ def _card_text(block: str, pat) -> str:
     return _html.unescape(re.sub(r"<[^>]+>", " ", m.group(1))).strip()
 
 
+def _get_listing(url: str, timeout: int = 25):
+    """一覧ページを取る。実行環境によって中身が空で返ることがあるので、
+    何が返ってきたかを必ず残す(本文が空だと例外にならず、原因が分からない)。"""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip",
+        "Referer": "https://livepocket.jp/",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+    })
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+        data = r.read()
+        if r.headers.get("Content-Encoding") == "gzip":
+            data = gzip.decompress(data)
+        html = data.decode("utf-8", "replace")
+        if not html.strip():
+            print(f"    一覧の本文が空です(HTTP {r.status} / {len(data)}バイト): {url[:70]}")
+        return html
+    except Exception as e:
+        print(f"    一覧の取得に失敗: {type(e).__name__} {e} / {url[:70]}")
+        return None
+
+
 def livepocket_listing(pages: int = 3):
     """アイドルカテゴリの新着一覧を読み、カードの内容をそのまま返す。
 
@@ -351,7 +380,11 @@ def livepocket_listing(pages: int = 3):
     out = []
     for page in range(1, max(1, pages) + 1):
         url = LIVEPOCKET_IDOL_LIST + (f"&page={page}" if page > 1 else "")
-        html = _get(url)
+        dt = time.time() - _last_call[0]
+        if dt < _MIN_INTERVAL:
+            time.sleep(_MIN_INTERVAL - dt)
+        _last_call[0] = time.time()
+        html = _get_listing(url)
         if not html:
             break
         blocks = _CARD_SPLIT.split(html)[1:]
