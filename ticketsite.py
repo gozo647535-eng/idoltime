@@ -633,3 +633,13 @@ def listing_check(urls=None):
               f" / イベントURL {events}件")
         if waf or events == 0:
             print(f"    冒頭: {head[:110]}")
+        if site_of(url):
+            # イベントページなら、取り込みに使う形まで読めるかも見る
+            info = fetch_event(url)
+            if not info:
+                print("    イベントとして読めません")
+            else:
+                print(f"    {str(info['event_name'])[:34]} / {info['event_datetime']}"
+                      f" / {str(info['venue'])[:20]} / 売={info['sale_datetime']}"
+                      f" / 先着={info['is_first_come']} / 券種{len(info['ticket_types'])}件"
+                      f" / 出演{len(info['performers'])}組")
