@@ -39,12 +39,120 @@ _MIN_INTERVAL = 1.5
 _last_call = [0.0]
 
 
-def _get(url: str, timeout: int = 20) -> Optional[str]:
+def _pace() -> None:
+    dt = time.time() - _last_call[0]
+    if dt < _MIN_INTERVAL:
+        time.sleep(_MIN_INTERVAL - dt)
+    _last_call[0] = time.time()
+
+
+# AWS WAF のボット対策ページの目印。本物のページは数十KBあるのに対し、
+# このページは2KBほどで中身が無く、JavaScript の認証だけを返す。
+_WALL_MARKS = ("awsWafCookieDomainList", "gokuProps", "challenge.js")
+
+
+def bot_wall(html: Optional[str]) -> bool:
+    if not html:
+        return False
+    return len(html) < 20000 and any(m in html for m in _WALL_MARKS)
+
+
+class _Browser:
+    """ボット対策が求める「JavaScript を実行する本物のブラウザ」として開く。
+
+    LivePocket はデータセンターからの素の HTTP 取得に認証ページを返す。
+    求められているのはブラウザであることなので、Chromium で素直に開く。
+    IP の切り替えや突破代行サービスのような、検知自体をかいくぐる手段は使わない。
+
+    1回の実行で Chromium は1つだけ起動し、認証済みのクッキーを以降の
+    ページでも使い回す(認証のやり直しを増やさないため)。
+    取得件数も _MAX_PAGES までに抑える。
+    """
+
+    _MAX_PAGES = 30
+
+    def __init__(self):
+        self._pw = None
+        self._browser = None
+        self._page = None
+        self._broken = False
+        self.used = 0
+
+    def _ensure_page(self):
+        if self._broken or self.used >= self._MAX_PAGES:
+            return None
+        if self._page is not None:
+            return self._page
+        try:
+            from playwright.sync_api import sync_playwright
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch(
+                args=["--no-sandbox", "--disable-dev-shm-usage"])
+            ctx = self._browser.new_context(
+                user_agent=UA, locale="ja-JP",
+                viewport={"width": 1280, "height": 900})
+            self._page = ctx.new_page()
+            print("    ブラウザを起動しました(ボット対策ページの迂回用)")
+        except Exception as e:
+            print(f"    ブラウザを起動できません: {type(e).__name__} {e}")
+            self._broken = True
+            self.close()
+        return self._page
+
+    def get(self, url: str, timeout: int = 30000) -> Optional[str]:
+        page = self._ensure_page()
+        if page is None:
+            return None
+        self.used += 1
+        _pace()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            html = page.content()
+            # 認証ページが返ったら、ブラウザ側の JavaScript が済むのを待つ。
+            # 認証は通常1回で終わり、同じクッキーが以降のページでも使える。
+            for _ in range(3):
+                if not bot_wall(html):
+                    break
+                page.wait_for_timeout(3500)
+                html = page.content()
+                if bot_wall(html):
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=timeout)
+                        page.wait_for_timeout(1000)
+                    except Exception:
+                        pass
+                    html = page.content()
+            if bot_wall(html):
+                print(f"    ボット対策を通過できません: {url[:70]}")
+                return None
+            return html
+        except Exception as e:
+            print(f"    ブラウザでの取得に失敗: {type(e).__name__} {str(e)[:70]} / {url[:60]}")
+            return None
+
+    def close(self) -> None:
+        for obj in (self._browser, self._pw):
+            try:
+                if obj is self._pw:
+                    obj and obj.stop()
+                else:
+                    obj and obj.close()
+            except Exception:
+                pass
+        self._pw = self._browser = self._page = None
+
+
+_BROWSER = _Browser()
+
+
+def close_browser() -> None:
+    """起動していればブラウザを閉じる(1回の実行の最後に呼ぶ)。"""
+    _BROWSER.close()
+
+
+def _http_get(url: str, timeout: int = 20) -> Optional[str]:
     try:
-        dt = time.time() - _last_call[0]
-        if dt < _MIN_INTERVAL:
-            time.sleep(_MIN_INTERVAL - dt)
-        _last_call[0] = time.time()
+        _pace()
         req = urllib.request.Request(url, headers={
             "User-Agent": UA, "Accept-Encoding": "gzip", "Accept-Language": "ja,en;q=0.8"})
         r = urllib.request.urlopen(req, timeout=timeout)
@@ -55,6 +163,14 @@ def _get(url: str, timeout: int = 20) -> Optional[str]:
     except Exception as e:
         print(f"    チケットサイト取得失敗 {url}: {e}")
         return None
+
+
+def _get(url: str, timeout: int = 20) -> Optional[str]:
+    """ページを取る。ボット対策ページが返ったときだけブラウザで開き直す。"""
+    html = _http_get(url, timeout)
+    if bot_wall(html):
+        return _BROWSER.get(url)
+    return html
 
 
 def _ldjson_block(html: str) -> str:
@@ -219,6 +335,14 @@ def _livepocket_sale(lines):
     return None
 
 
+# 券種名の下に出る販売状況のラベル。券種名と間違えて拾わないように除く
+# (「予定販売数終了」「売切間近」が券種名として保存されていた)
+_LP_BADGE = re.compile(
+    r"^(?:販売(?:中|前|開始前|終了|休止中)|予定販売数終了|売(?:切|り切れ)(?:間近)?|"
+    r"完売(?:間近)?|受付(?:中|前|終了)|残り(?:わずか|少)|キャンセル待ち|"
+    r"取扱(?:終了|開始前)|[¥￥（(].*)$")
+
+
 def _livepocket_ticket_types(lines):
     """「前方チケット / 販売中 / ¥4,000」の並びから券種と価格を拾う。"""
     out = []
@@ -231,7 +355,7 @@ def _livepocket_ticket_types(lines):
             if i - back < 0:
                 break
             cand = lines[i - back]
-            if re.match(r"^(販売中|販売終了|完売|売切|受付中|[¥￥（(].*)$", cand):
+            if _LP_BADGE.match(cand):
                 continue
             if 1 <= len(cand) <= 40:
                 out.append({"name": cand, "price": f"{price}円"})
@@ -344,6 +468,7 @@ def _card_text(block: str, pat) -> str:
 def _get_listing(url: str, timeout: int = 25):
     """一覧ページを取る。実行環境によって中身が空で返ることがあるので、
     何が返ってきたかを必ず残す(本文が空だと例外にならず、原因が分からない)。"""
+    _pace()
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -364,6 +489,8 @@ def _get_listing(url: str, timeout: int = 25):
         html = data.decode("utf-8", "replace")
         if not html.strip():
             print(f"    一覧の本文が空です(HTTP {r.status} / {len(data)}バイト): {url[:70]}")
+        if bot_wall(html):
+            return _BROWSER.get(url)
         return html
     except Exception as e:
         print(f"    一覧の取得に失敗: {type(e).__name__} {e} / {url[:70]}")
@@ -380,10 +507,6 @@ def livepocket_listing(pages: int = 3):
     out = []
     for page in range(1, max(1, pages) + 1):
         url = LIVEPOCKET_IDOL_LIST + (f"&page={page}" if page > 1 else "")
-        dt = time.time() - _last_call[0]
-        if dt < _MIN_INTERVAL:
-            time.sleep(_MIN_INTERVAL - dt)
-        _last_call[0] = time.time()
         html = _get_listing(url)
         if not html:
             break

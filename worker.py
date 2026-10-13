@@ -1999,6 +1999,34 @@ def _ttx_source_slug(tweet_id: str, idol_slug: str) -> Optional[str]:
     return parts[0] if len(parts) == 3 else None
 
 
+def fix_ticket_urls() -> int:
+    """保存済みの ticket_url に混ざったゴミを落とす。
+
+    TimeTree のノートや Googleカレンダーの説明文からURLを拾う経路では、
+    末尾に HTML の残り("> など)や見えない文字が付くことがあった。抽出側は
+    直したが、すでに書かれた行は残るのでここで洗う(174行で確認)。
+    """
+    try:
+        rows = sb.get_ticket_url_rows()
+    except Exception as e:
+        print(f"  ticket_url の点検に失敗: {e}")
+        return 0
+    fixed = 0
+    for r in rows:
+        url = r.get("ticket_url")
+        clean = sb.clean_url(url)
+        if clean == url:
+            continue
+        try:
+            sb.patch_auto_event(r["tweet_id"], {"ticket_url": clean})
+            fixed += 1
+        except Exception as e:
+            print(f"  URL の書き換えに失敗 {r['tweet_id'][:40]}: {e}")
+    if fixed:
+        print(f"ticket_url を修復: {fixed} 件 / {len(rows)} 件中")
+    return fixed
+
+
 def cleanup_orphan_rows() -> int:
     """図鑑からリンクを外したグループの行を掃除する。
 
@@ -2120,6 +2148,7 @@ def main() -> int:
         run_curated()
         run_yahoo_rt()
         run_livepocket()
+        fix_ticket_urls()
         cleanup_orphan_rows()
     if x_only or os.environ.get("ENABLE_X_INGEST") == "1":
         asyncio.run(run_x())
@@ -2127,4 +2156,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    finally:
+        # ボット対策の迂回でブラウザを起動していたら閉じる
+        ticketsite.close_browser()
+    sys.exit(code)

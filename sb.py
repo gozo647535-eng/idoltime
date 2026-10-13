@@ -73,6 +73,7 @@ service_role キーで書き込むため、SUPABASE_SERVICE_KEY は絶対に公�
 """
 import json
 import os
+import re
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -136,9 +137,55 @@ def _drop_missing_columns(rows):
     return rows
 
 
+# URLの終わりになり得ない文字。ノート本文や予定の説明文からURLを拾う経路
+# (TimeTree / Googleカレンダー)があるため、末尾に HTML の残り("> など)や
+# 見えない文字(全角空白・ハングル埋め字 U+3164・点字空白 U+2800)が付いた
+# URLが実際に保存されていた(174行)。リンクが開けず、同じ販売ページとして
+# まとまらないので、書き込む直前にここで落とす。
+_URL_TAIL = re.compile(
+    r'[\s"\'<>）)」』、。\u3000\u2800-\u28ff\u3130-\u318f\u200b-\u200f]')
+
+
+def clean_url(url):
+    """URLに混ざった末尾のゴミを落とす。URLでなければそのまま返す。"""
+    if not url or not isinstance(url, str):
+        return url
+    m = _URL_TAIL.search(url.strip())
+    out = (url.strip()[:m.start()] if m else url.strip()).rstrip('",\'')
+    return out or None
+
+
+def _clean_urls(rows):
+    for r in rows:
+        for key in ("ticket_url", "tweet_url"):
+            if r.get(key):
+                r[key] = clean_url(r[key])
+    return rows
+
+
+def get_ticket_url_rows():
+    """ticket_url を持つ行を [{tweet_id, ticket_url}] で全件返す(URL修復用)。"""
+    out, offset = [], 0
+    while True:
+        _, rows = _request("GET", "auto_events", params={
+            "select": "tweet_id,ticket_url", "ticket_url": "not.is.null",
+            "order": "tweet_id.asc", "limit": "1000", "offset": str(offset)})
+        rows = rows or []
+        out += rows
+        if len(rows) < 1000:
+            return out
+        offset += 1000
+
+
+def patch_auto_event(tweet_id: str, patch: dict):
+    """tweet_id を指定して1行の一部の列だけを書き換える。"""
+    _request("PATCH", "auto_events", params={"tweet_id": f"eq.{tweet_id}"},
+             body=patch, headers={"Prefer": "return=minimal"})
+
+
 def upsert_auto_event(row: dict):
     """tweet_id をキーに auto_events を upsert(重複投稿は上書き)。"""
-    _drop_missing_columns([row])
+    _drop_missing_columns(_clean_urls([row]))
     _request(
         "POST",
         "auto_events",
@@ -151,7 +198,7 @@ def upsert_auto_event(row: dict):
 def upsert_auto_events(rows):
     """auto_events を一括 upsert。1行ずつ POST すると件数分のHTTP往復になる
     (フェス1本で150グループ分の行が立つため、ここが実行時間を食っていた)。"""
-    rows = _drop_missing_columns([r for r in rows if r])
+    rows = _drop_missing_columns(_clean_urls([r for r in rows if r]))
     if not rows:
         return
     for i in range(0, len(rows), 200):
