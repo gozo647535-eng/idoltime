@@ -1746,8 +1746,9 @@ def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
     (高頻度実行でも相手サイトへの負荷と実行時間を増やさないため)。
     """
     cache_key = _yrt_cache_key(source, url)
+    force = os.environ.get("YRT_FORCE", "").lower() in ("1", "true")
     try:
-        if sb.get_last_seen(cache_key) == today:
+        if not force and sb.get_last_seen(cache_key) == today:
             return 0, True
     except Exception:
         pass

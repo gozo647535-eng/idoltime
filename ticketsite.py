@@ -15,6 +15,7 @@ import html as _html
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import List, Optional
@@ -51,6 +52,10 @@ def _pace() -> None:
 # AWS WAF のボット対策ページの目印。本物のページは数十KBあるのに対し、
 # このページは2KBほどで中身が無く、JavaScript の認証だけを返す。
 _WALL_MARKS = ("awsWafCookieDomainList", "gokuProps", "challenge.js")
+
+
+# 素の HTTP 取得が断られたことを表す印(403/429)
+_BLOCKED = "__blocked__"
 
 
 def bot_wall(html: Optional[str]) -> bool:
@@ -190,15 +195,22 @@ def _http_get(url: str, timeout: int = 20) -> Optional[str]:
         if r.headers.get("Content-Encoding") == "gzip":
             data = gzip.decompress(data)
         return data.decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            # ボット対策は認証ページだけでなく、403/429 で突き返す形でも出る
+            print(f"    HTTP {e.code} で断られました(ブラウザで開き直します): {url[:70]}")
+            return _BLOCKED
+        print(f"    チケットサイト取得失敗 {url}: {e}")
+        return None
     except Exception as e:
         print(f"    チケットサイト取得失敗 {url}: {e}")
         return None
 
 
 def _get(url: str, timeout: int = 20) -> Optional[str]:
-    """ページを取る。ボット対策ページが返ったときだけブラウザで開き直す。"""
+    """ページを取る。ボット対策で阻まれたときだけブラウザで開き直す。"""
     html = _http_get(url, timeout)
-    if bot_wall(html):
+    if html is _BLOCKED or bot_wall(html):
         return _BROWSER.get(url)
     return html
 
@@ -526,6 +538,12 @@ def _get_listing(url: str, timeout: int = 25):
         if bot_wall(html):
             return _BROWSER.get(url)
         return html
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            print(f"    一覧が HTTP {e.code} で断られました(ブラウザで開き直します)")
+            return _BROWSER.get(url)
+        print(f"    一覧の取得に失敗: HTTP {e.code} / {url[:70]}")
+        return None
     except Exception as e:
         print(f"    一覧の取得に失敗: {type(e).__name__} {e} / {url[:70]}")
         return None
