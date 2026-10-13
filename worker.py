@@ -2118,6 +2118,9 @@ def main() -> int:
     discovery_only = os.environ.get("DISCOVERY_ONLY", "").lower() == "true"
     if discovery_only:
         run_yahoo_rt(discover_sites=False)
+        # URLの修復は1回洗えば終わりだが、点検自体は数回の読み取りで済むので
+        # 軽量モードでも回す(新しく混ざった分をその日のうちに直せる)。
+        fix_ticket_urls()
         # 掃除は読み書きが数回で済むので、軽量モードでも回す。図鑑のリンクを
         # 直した日に、フル巡回(1日1回)を待たずに古い予定が消えるようにする。
         cleanup_orphan_rows()
