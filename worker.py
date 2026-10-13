@@ -1785,7 +1785,18 @@ def run_livepocket() -> int:
 
     一覧に「販売前」の表示と出演者が載っているため、登録グループが出る販売前の
     ものだけに絞ってからイベントページを取りに行く(無駄な取得をしない)。
+
+    ただし LivePocket の検索・一覧は AWS WAF のボット対策の内側にあり、
+    データセンターからのアクセスには JavaScript の認証を求めるページ
+    (awsWafCookieDomainList / gokuProps を含む2,415字)が返る。GitHub Actions から
+    では一覧を読めないため、既定では動かさない。個別のイベントページは読めるので、
+    Yahoo!リアルタイム検索で見つけたぶんの取り込みには影響しない。
+    LIVEPOCKET_LISTING=1 で有効にできる(手元など、読める環境で使う)。
     """
+    if os.environ.get("LIVEPOCKET_LISTING") != "1":
+        print("LivePocket の一覧巡回は無効です(WAF のため既定で停止。"
+              "LIVEPOCKET_LISTING=1 で有効)")
+        return 0
     try:
         cards = ticketsite.livepocket_listing(pages=LIVEPOCKET_PAGES)
     except Exception as e:
