@@ -40,6 +40,10 @@ on:
         description: "チケットサイトの一覧ページに到達できるかだけ確認(数秒)"
         type: boolean
         default: false
+      listing_check_urls:
+        description: "確認するURLをカンマ区切りで指定(省略時は既定の一覧ページ)"
+        type: string
+        default: ""
 
 concurrency:
   group: ingest
@@ -96,6 +100,7 @@ jobs:
           GCAL_ONLY: ${{ github.event.inputs.gcal_only }}
           LIVEPOCKET_ONLY: ${{ github.event.inputs.livepocket_only }}
           LISTING_CHECK: ${{ github.event.inputs.listing_check }}
+          LISTING_CHECK_URLS: ${{ github.event.inputs.listing_check_urls }}
           # cookies.json が無効化された場合のフォールバック(任意)
           X_USERNAME: ${{ secrets.X_USERNAME }}
           X_EMAIL: ${{ secrets.X_EMAIL }}

@@ -416,6 +416,26 @@ def livepocket_listing(pages: int = 3):
 TIGET_IDOL_LIST = "https://tiget.net/events?categories=29"
 
 
+def organizer_of(html: str):
+    """イベントページから主催者ページ(/p/<slug>)を取り出す。
+
+    LivePocket の検索・一覧は AWS WAF の内側だが、主催者ページは通る。
+    同じ主催者は繰り返し公演を打つので、ここを辿れば検索を使わずに
+    新しい公演を見つけられる。
+    """
+    m = re.search(r'href="(/p/[A-Za-z0-9_-]+)"', html or "")
+    return "https://livepocket.jp" + m.group(1) if m else None
+
+
+def livepocket_organizer_events(url: str):
+    """主催者ページに並ぶイベントURLを返す。"""
+    html = _get_listing(url)
+    if not html:
+        return []
+    return sorted({"https://livepocket.jp" + p
+                   for p in re.findall(r"/e/[A-Za-z0-9_-]+", html)})
+
+
 def listing_check(urls=None):
     """一覧ページに実行環境からアクセスできるかを調べて表示する。
 

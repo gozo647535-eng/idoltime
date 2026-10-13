@@ -2109,7 +2109,8 @@ def main() -> int:
     # 一覧ページに実行環境からアクセスできるかの確認だけを行う(数秒)
     if os.environ.get("LISTING_CHECK", "").lower() == "true":
         print("チケットサイトの一覧ページを確認します")
-        ticketsite.listing_check()
+        extra = os.environ.get("LISTING_CHECK_URLS", "").strip()
+        ticketsite.listing_check([u.strip() for u in extra.split(",") if u.strip()] or None)
         return 0
     if not x_only:
         run_sites()
