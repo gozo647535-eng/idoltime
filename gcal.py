@@ -16,7 +16,7 @@ import urllib.request
 import timetree  # イベント名の整形・メモからのチケットURL抽出を共用
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
-EXTRACT_VERSION = "gc3"  # 会場欄が空の予定はメモから会場名を拾うようにしたので再取り込み
+EXTRACT_VERSION = "gc4"  # チケットURLの切り出しを直したので再取り込み
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 

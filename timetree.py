@@ -77,14 +77,18 @@ _SALE_RE = re.compile(
     _SALE_KW + r"[^\d\n]{0,8}(\d{1,2})[/月](\d{1,2})(?:日)?[^\d\n]{0,6}(?:(\d{1,2})[:：](\d{2}))?"
 )
 # メモ本文からチケットURLを拾う(短縮ドメインも含む)
+# URL に使えない文字で必ず止める。メモが HTML のとき(Googleカレンダー)に
+# 引用符やタグまで飲み込み、リンクが壊れていた
+# (https://t-dv.com/XXX</a><br>… のような値が170行入っていた)。
+_URL_CHAR = r'[^\s　"\'<>）)」』、。]'
 _TICKET_URL_RE = re.compile(
-    r"https?://[^\s　]*(?:ticketdive\.com|t-dv\.com|eplus\.jp|t\.pia\.jp|pia\.jp|"
-    r"l-tike\.com|livepocket\.jp|t\.livepocket\.jp|tiget\.net)[^\s　]*",
+    r"https?://" + _URL_CHAR + r"*(?:ticketdive\.com|t-dv\.com|eplus\.jp|t\.pia\.jp|pia\.jp|"
+    r"l-tike\.com|livepocket\.jp|t\.livepocket\.jp|tiget\.net)" + _URL_CHAR + r"*",
     re.IGNORECASE,
 )
 # t-dv.com/xxx のような "https://" が省略された短縮表記も拾う
 _TICKET_URL_BARE_RE = re.compile(
-    r"(?<![\w/])(?:t-dv\.com|tiget\.net|l-tike\.com)/[^\s　]+", re.IGNORECASE
+    r"(?<![\w/])(?:t-dv\.com|tiget\.net|l-tike\.com)/" + _URL_CHAR + r"+", re.IGNORECASE
 )
 
 

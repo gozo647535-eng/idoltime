@@ -186,6 +186,83 @@ def _livepocket_performers(html: str) -> List[str]:
     return out
 
 
+def _page_lines(html: str):
+    """ページ本文を行に戻す。JSON-LD に無い情報(販売受付期間・券種・先着)を読むため。"""
+    t = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", html or "")
+    t = re.sub(r"<[^>]+>", "\n", t)
+    t = _html.unescape(t)
+    return [ln.strip() for ln in t.split("\n") if ln.strip()]
+
+
+# 「2026年10月2日(金) 21:00」
+_JP_DT_LINE = re.compile(
+    r"(20\d\d)\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日[^\d]{0,6}(\d{1,2})\s*[:：]\s*(\d{2})")
+
+
+def _livepocket_sale(lines):
+    """LivePocket の「販売受付期間」から発売開始日時を取る。
+
+    LivePocket の JSON-LD には validFrom が無く(offers は価格だけ)、
+    発売開始はページ本文にしか書かれていない。
+    """
+    for i, ln in enumerate(lines):
+        if "販売受付期間" not in ln and "受付期間" not in ln:
+            continue
+        # 見出しの次の数行に「2026年10月2日(金) 21:00」「〜2026年10月17日(土) 15:00」と続く
+        for nxt in lines[i + 1:i + 5]:
+            if nxt.startswith(("〜", "~")):
+                continue  # 終了日時なので使わない
+            m = _JP_DT_LINE.search(nxt)
+            if m:
+                y, mo, d, h, mi = (int(x) for x in m.groups())
+                return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:00"
+    return None
+
+
+def _livepocket_ticket_types(lines):
+    """「前方チケット / 販売中 / ¥4,000」の並びから券種と価格を拾う。"""
+    out = []
+    for i, ln in enumerate(lines):
+        if not re.match(r"^[¥￥]\s*[\d,]+$", ln):
+            continue
+        price = ln.replace("￥", "¥").replace("¥", "").strip()
+        # 価格の上に「販売中」などの状態、その上に券種名が来る
+        for back in range(1, 4):
+            if i - back < 0:
+                break
+            cand = lines[i - back]
+            if re.match(r"^(販売中|販売終了|完売|売切|受付中|[¥￥（(].*)$", cand):
+                continue
+            if 1 <= len(cand) <= 40:
+                out.append({"name": cand, "price": f"{price}円"})
+            break
+    # 同じ券種が複数回出ることがあるので重複を除く
+    seen, uniq = set(), []
+    for t in out:
+        k = (t["name"], t["price"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(t)
+    return uniq
+
+
+# 抽選・先行抽選をうたう文言。これが無ければ先着として扱う
+_LOTTERY_RE = re.compile(r"抽選|先行受付|先行販売|プレオーダー|申込多数")
+
+
+def _first_come(lines, description: str):
+    """先着かどうか。LivePocket は「先着」と明記される。
+
+    TiGET / LivePocket はどちらも申し込み順に売る仕組みで、抽選は主催が
+    別途案内する形。明記が無いときは先着として扱い、抽選をうたう文言が
+    あるときだけ False にする。
+    """
+    text = "\n".join(lines[:400]) + "\n" + (description or "")
+    if "先着" in text:
+        return True
+    return not _LOTTERY_RE.search(text)
+
+
 def fetch_event(url: str) -> Optional[dict]:
     """LivePocket / TiGET のイベントページを解析して共通形式の dict を返す。"""
     site = site_of(url)
@@ -208,6 +285,14 @@ def fetch_event(url: str) -> Optional[dict]:
     if mp:
         price = mp.group(1).replace(",", "")
     sale = _sale_datetime(_json_string(block, "validFrom") or "")
+    lines = _page_lines(html)
+    ticket_types = (
+        [{"name": "チケット", "price": f"{int(price):,}円"}] if price and price.isdigit() else []
+    )
+    if site == "livepocket":
+        # JSON-LD に無い発売開始・券種は本文から取る
+        sale = sale or _livepocket_sale(lines)
+        ticket_types = _livepocket_ticket_types(lines) or ticket_types
 
     if site == "livepocket":
         performers = _livepocket_performers(html) or _split_performers(_nested_name(block, "performer") or "")
@@ -223,7 +308,8 @@ def fetch_event(url: str) -> Optional[dict]:
         "event_datetime": _jp_datetime(start or ""),
         "venue": venue,
         "sale_datetime": sale,
-        "ticket_types": ([{"name": "チケット", "price": f"{int(price):,}円"}] if price and price.isdigit() else []),
+        "is_first_come": _first_come(lines, description),
+        "ticket_types": ticket_types,
         "performers": performers,
         "act_text": act_text,
         "act_labeled": act_labeled,
