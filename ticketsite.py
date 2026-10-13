@@ -356,6 +356,13 @@ def livepocket_listing(pages: int = 3):
             break
         blocks = _CARD_SPLIT.split(html)[1:]
         if not blocks:
+            # 実行環境によっては別のページ(同意画面など)が返ることがあるので、
+            # 何が返ってきたか分かるようにしておく
+            title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+            head = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html[:400])).strip()
+            print(f"    LivePocket 一覧にカードがありません({len(html)}字"
+                  f" / title={_html.unescape(title.group(1)).strip()[:40] if title else 'なし'})"
+                  f" 冒頭: {head[:120]}")
             break
         for b in blocks:
             m = _CARD_HREF.search(b)
