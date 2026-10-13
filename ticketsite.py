@@ -443,11 +443,25 @@ def _first_come(lines, description: str):
     return not _LOTTERY_RE.search(text)
 
 
+def canonical_url(url: str) -> str:
+    """URLの末尾に本文が続いてしまったものを、サイトの形に合わせて切る。
+
+    ノートから拾う経路では「https://tiget.net/events/5170518/28（金」のように
+    日付がくっついた形が実際にあった。
+    """
+    for pat in (LIVEPOCKET_RE, TIGET_RE):
+        m = pat.match(url or "")
+        if m:
+            return m.group(0)
+    return url
+
+
 def fetch_event(url: str) -> Optional[dict]:
     """LivePocket / TiGET のイベントページを解析して共通形式の dict を返す。"""
     site = site_of(url)
     if not site:
         return None
+    url = canonical_url(url)
     html = _get(url)
     if not html:
         return None
