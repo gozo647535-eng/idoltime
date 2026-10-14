@@ -140,13 +140,25 @@ _URL_TAIL = re.compile(
     r'[\s"\'<>（）()「」『』【】、。\u3000\u2800-\u28ff\u3130-\u318f\u200b-\u200f]')
 
 
+# 投稿やノートには「t-dv.com/XXX」のようにスキームの無い書き方も出てくる。
+# そのままでは取得できないので、ここで補って https に寄せる。
+_TICKET_HOSTS = ("t-dv.com", "ticketdive.com", "livepocket.jp", "tiget.net")
+
+
 def clean_url(url):
-    """URLに混ざった末尾のゴミを落とす。URLでなければそのまま返す。"""
+    """URLに混ざった末尾のゴミを落とし、スキームを補う。URLでなければそのまま返す。"""
     if not url or not isinstance(url, str):
         return url
     m = _URL_TAIL.search(url.strip())
     out = (url.strip()[:m.start()] if m else url.strip()).rstrip('",\'')
-    return out or None
+    if not out:
+        return None
+    host = out.split("/")[0].lower().removeprefix("www.")
+    if host in _TICKET_HOSTS:
+        return "https://" + out
+    if out.startswith("http://") and any(h in out for h in _TICKET_HOSTS):
+        return "https://" + out[len("http://"):]
+    return out
 
 
 def _clean_urls(rows):
