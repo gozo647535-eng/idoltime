@@ -487,6 +487,9 @@ def fetch_event(url: str) -> Optional[dict]:
         # JSON-LD に無い発売開始・券種は本文から取る
         sale = sale or _livepocket_sale(lines)
         ticket_types = _livepocket_ticket_types(lines) or ticket_types
+        if not sale:
+            print(f"    LivePocket の販売受付期間が読めません({len(html)}字 /"
+                  f" 受付期間の表記={'あり' if '受付期間' in html else 'なし'}): {url[:60]}")
 
     if site == "livepocket":
         performers = _livepocket_performers(html) or _split_performers(_nested_name(block, "performer") or "")

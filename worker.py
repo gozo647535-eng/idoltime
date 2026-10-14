@@ -2111,7 +2111,9 @@ def refresh_sale_info() -> int:
             "ticket_types": info.get("ticket_types") or [],
         }
         if not patch["sale_datetime"]:
-            continue  # 発売日時が取れないなら上書きしない
+            # 読めたのに発売日時が無いことが続くと原因が分からないので残す
+            print(f"    発売日時が見つかりません: {url[:70]}")
+            continue  # 取れないなら上書きしない
         for r in by_url[url]:
             try:
                 sb.patch_auto_event(r["tweet_id"], patch)
