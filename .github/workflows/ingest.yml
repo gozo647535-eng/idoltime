@@ -40,6 +40,10 @@ on:
         description: "当日取得済みのチケットページも読み直す(発売日時や会場の入り直しの確認用)"
         type: boolean
         default: false
+      tiget_only:
+        description: "TiGETの新着一覧のみ巡回(数分。先着の取り込み確認用)"
+        type: boolean
+        default: false
       listing_check:
         description: "チケットサイトの一覧ページに到達できるかだけ確認(数秒)"
         type: boolean
@@ -103,6 +107,7 @@ jobs:
           SITE_SLUGS: ${{ github.event.inputs.site_slugs }}
           GCAL_ONLY: ${{ github.event.inputs.gcal_only }}
           LIVEPOCKET_ONLY: ${{ github.event.inputs.livepocket_only }}
+          TIGET_ONLY: ${{ github.event.inputs.tiget_only }}
           YRT_FORCE: ${{ github.event.inputs.yrt_force }}
           LISTING_CHECK: ${{ github.event.inputs.listing_check }}
           LISTING_CHECK_URLS: ${{ github.event.inputs.listing_check_urls }}

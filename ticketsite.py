@@ -615,8 +615,68 @@ def livepocket_listing(pages: int = 3):
             })
     return out
 
-# TiGET のアイドルカテゴリ一覧(categories=29)
-TIGET_IDOL_LIST = "https://tiget.net/events?categories=29"
+# TiGET のアイドルカテゴリ一覧(categories=29)を公開が新しい順に並べたもの。
+# 公開された時点で拾えるよう、新着順で読む。
+TIGET_IDOL_LIST = "https://tiget.net/events?categories=29&sort=new_arrivals"
+
+_TG_SPLIT = re.compile(r'<div class="event-box')
+_TG_HREF = re.compile(r'<div class="event-title"><a href="(/events/\d+)">(.*?)</a>', re.S)
+_TG_FIELD = {
+    # 「開催：2026年11月13日(金)」「場所：東京都」の後ろ側
+    "date": re.compile(r'class="play-date">(.*?)</div>', re.S),
+    "area": re.compile(r'class="event-area">(.*?)</div>', re.S),
+    "status": re.compile(r"c-statusbox__tag'>(.*?)</div>", re.S),
+}
+
+
+def _tg_text(block: str, pat) -> str:
+    m = pat.search(block)
+    if not m:
+        return ""
+    t = _html.unescape(re.sub(r"<[^>]+>", " ", m.group(1))).strip()
+    return re.sub(r"^(?:開催|場所)\s*[：:]\s*", "", t).strip()
+
+
+def tiget_listing(pages: int = 2):
+    """TiGET のアイドルカテゴリ新着一覧に並ぶイベントを返す。
+
+    返り値: [{url, name, date, area, status}]
+
+    LivePocket の一覧と違い、TiGET の一覧には出演者も会場名も載らず、
+    公演名も途中で切れている(「Pepe Fes vol.68〜Greatest Lovers ...」)。
+    そのため一覧では絞り込めず、出演者を見るにはイベントページを取りに行く
+    必要がある(1ページ24件。同じカードがPC用とスマホ用で2回出てくる)。
+    """
+    out, seen = [], set()
+    for page in range(1, max(1, pages) + 1):
+        url = TIGET_IDOL_LIST + (f"&page={page}" if page > 1 else "")
+        html = _get_listing(url)
+        if not html:
+            break
+        blocks = _TG_SPLIT.split(html)[1:]
+        found = 0
+        for b in blocks:
+            m = _TG_HREF.search(b)
+            if not m:
+                continue
+            full = "https://tiget.net" + m.group(1)
+            found += 1
+            if full in seen:
+                continue
+            seen.add(full)
+            out.append({
+                "url": full,
+                "name": _html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip(),
+                "date": _tg_text(b, _TG_FIELD["date"]),
+                "area": _tg_text(b, _TG_FIELD["area"]),
+                "status": _tg_text(b, _TG_FIELD["status"]),
+            })
+        if not found:
+            title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+            print(f"    TiGET 一覧にカードがありません({len(html)}字"
+                  f" / title={_html.unescape(title.group(1)).strip()[:40] if title else 'なし'})")
+            break
+    return out
 
 
 def organizer_of(html: str):

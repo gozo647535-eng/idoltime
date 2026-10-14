@@ -1829,6 +1829,58 @@ def run_livepocket() -> int:
     return total
 
 
+# TiGET のアイドルカテゴリ新着一覧を何ページ読むか(1ページ24件)
+TIGET_PAGES = int(os.environ.get("TIGET_PAGES", "2"))
+# そのうち実際にイベントページを取りに行く上限
+TIGET_FETCH_LIMIT = int(os.environ.get("TIGET_FETCH_LIMIT", "50"))
+# 一度読んだイベントページを、何日あけたら読み直すか
+TIGET_RECHECK_DAYS = int(os.environ.get("TIGET_RECHECK_DAYS", "7"))
+
+
+def run_tiget() -> int:
+    """TiGET のアイドルカテゴリ新着一覧から、登録グループが出るものを取り込む。
+
+    Yahoo!リアルタイム検索は X への投稿を拾う仕組みなので、投稿が無い公演や
+    投稿が発売直前の公演には間に合わない。一覧を直接見れば公開された時点で拾える。
+
+    LivePocket の一覧と違い、TiGET の一覧には出演者が載らず公演名も途中で
+    切れているため、出演者を見るにはイベントページを取りに行くしかない。
+    そこで一度読んだURLは TIGET_RECHECK_DAYS 日あけるまで読み直さない
+    (新着順なので、2回目以降に取りに行くのは新しく出たぶんだけになる)。
+    """
+    if os.environ.get("TIGET_LISTING") == "0":
+        print("TiGET の一覧巡回は無効化されています(TIGET_LISTING=0)")
+        return 0
+    try:
+        cards = ticketsite.tiget_listing(pages=TIGET_PAGES)
+    except Exception as e:
+        print(f"TiGET の一覧を取得できません: {e}")
+        return 0
+    if not cards:
+        print("TiGET の一覧からイベントを取れませんでした。")
+        return 0
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    cutoff = (datetime.datetime.now(JST)
+              - datetime.timedelta(days=TIGET_RECHECK_DAYS)).strftime("%Y-%m-%d")
+    try:
+        last = sb.get_last_seen_by_prefix("yrtu:tiget:")
+    except Exception:
+        last = {}
+    targets = [c for c in cards
+               if (last.get(_yrt_cache_key("tiget", c["url"])) or "") < cutoff]
+    print(f"TiGET 新着一覧: {len(cards)} 件 / 読み直しの時期でないものを除いて "
+          f"{len(targets)} 件")
+    idols = build_idol_name_list()
+    total = 0
+    touched = set()
+    for c in targets[:TIGET_FETCH_LIMIT]:
+        added, _ = _ingest_sale_url("tiget", c["url"], idols, today, touched)
+        total += added
+    removed = sum(_cleanup_past_yrt(slug, today) for slug in touched)
+    print(f"TiGET 取り込み完了: 合計 {total} 件 / 過去分 {removed} 件削除")
+    return total
+
+
 def run_yahoo_rt(discover_sites: bool = True) -> int:
     """Yahoo! リアルタイム検索で X 上のチケットサイト(TicketDive / LivePocket / TiGET)の
     リンクを発見し、出演者が図鑑の登録グループと一致するイベントを取り込む。
@@ -2210,6 +2262,9 @@ def main() -> int:
     if os.environ.get("LIVEPOCKET_ONLY", "").lower() == "true":
         run_livepocket()
         return 0
+    if os.environ.get("TIGET_ONLY", "").lower() == "true":
+        run_tiget()
+        return 0
     # 一覧ページに実行環境からアクセスできるかの確認だけを行う(数秒)
     if os.environ.get("LISTING_CHECK", "").lower() == "true":
         print("チケットサイトの一覧ページを確認します")
@@ -2224,6 +2279,7 @@ def main() -> int:
         run_curated()
         run_yahoo_rt()
         run_livepocket()
+        run_tiget()
         refresh_sale_info()
         fix_ticket_urls()
         cleanup_orphan_rows()
