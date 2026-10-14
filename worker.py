@@ -2053,8 +2053,12 @@ def _ttx_source_slug(tweet_id: str, idol_slug: str) -> Optional[str]:
     return parts[0] if len(parts) == 3 else None
 
 
-# 1回の巡回で発売情報を入れ直すチケットページの上限
-SALE_REFRESH_LIMIT = int(os.environ.get("SALE_REFRESH_LIMIT") or 40)
+# 1回の巡回で発売情報を入れ直すチケットページの上限。
+# 巡回は1日1回なので、40件だと対象470件を一周するのに10日以上かかり、
+# 入ったばかりのリンクは何日も発売日時が空のままだった(2026-10-14の巡回でも
+# 40件読んで未着手が76件残っている)。40件の読み込みは実測38秒なので、
+# 一周を1〜2回の巡回で終えられるところまで上げる。
+SALE_REFRESH_LIMIT = int(os.environ.get("SALE_REFRESH_LIMIT") or 250)
 
 
 def refresh_sale_info() -> int:
