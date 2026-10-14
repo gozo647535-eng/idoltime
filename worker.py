@@ -2087,10 +2087,20 @@ def refresh_sale_info() -> int:
         last = sb.get_last_seen_by_prefix("sale:")
     except Exception:
         last = {}
-    # 発売情報がまだ無いものを先に、その中では読んだ日が古い順に
+    # 発売がこれからのページを最優先にする。先着の一覧に出るのはこの行で、
+    # カレンダーのノートから入った「先着かどうか」が外れていることがある
+    # (実測: これから発売の8ページのうち3ページは、ページには先着と書いてある
+    # のに False のままだった)。次に、発売情報がまだ無いもの。同じ条件なら
+    # 読んだ日が古い順。
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    def _sale_upcoming(u: str) -> bool:
+        return any((r.get("sale_datetime") or "") > now_iso for r in by_url[u])
+
     cand = sorted(
         by_url,
-        key=lambda u: (all(r.get("sale_datetime") for r in by_url[u]),
+        key=lambda u: (not _sale_upcoming(u),
+                       all(r.get("sale_datetime") for r in by_url[u]),
                        last.get(f"sale:{u}") or ""),
     )
     # 当日すでに読んだものは上限を数える前に外す。あとで外すと、上限の枠を
@@ -2123,16 +2133,19 @@ def refresh_sale_info() -> int:
         if not info:
             failed += 1
             continue
-        patch = {
-            "sale_datetime": to_timestamptz(info.get("sale_datetime")),
-            "is_first_come": bool(info.get("is_first_come")),
-            "ticket_types": info.get("ticket_types") or [],
-        }
-        if not patch["sale_datetime"]:
-            # 読めたのに発売日時が無いことが続くと原因が分からないので残す
+        patch = {"is_first_come": bool(info.get("is_first_come"))}
+        sale = to_timestamptz(info.get("sale_datetime"))
+        if sale:
+            patch["sale_datetime"] = sale
+        else:
+            # 読めたのに発売日時が無いことが続くと原因が分からないので残す。
+            # 発売日時は上書きしないが、先着かどうかと券種はページで分かるので
+            # 書き足す(ノート由来の誤りがここで直る)。
             nosale += 1
             print(f"    発売日時が見つかりません: {url[:70]}")
-            continue  # 取れないなら上書きしない
+        types = info.get("ticket_types") or []
+        if types:
+            patch["ticket_types"] = types
         for r in by_url[url]:
             try:
                 sb.patch_auto_event(r["tweet_id"], patch)
