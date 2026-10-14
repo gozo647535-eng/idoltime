@@ -2099,6 +2099,8 @@ def refresh_sale_info() -> int:
         cand = [u for u in cand if last.get(f"sale:{u}") != today]
     if not cand:
         return 0
+    print("  先に読む販売ページ: "
+          + " / ".join(f"{u.split('/')[-1][:24]}({len(by_url[u])}行)" for u in cand[:8]))
     filled = read = failed = nosale = 0
     for url in cand[:SALE_REFRESH_LIMIT]:
         read += 1
