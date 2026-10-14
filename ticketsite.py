@@ -90,7 +90,9 @@ class _Browser:
     取得件数も _MAX_PAGES までに抑える。
     """
 
-    _MAX_PAGES = int(os.environ.get("BROWSER_PAGE_LIMIT", "40"))
+    # LivePocket はページごとにブラウザが必要なので、1回の巡回で読む見込み
+    # (集めてあるリンク42件 + 一覧3ページ)より多めにしておく
+    _MAX_PAGES = int(os.environ.get("BROWSER_PAGE_LIMIT") or 60)
 
     def __init__(self):
         self._pw = None
