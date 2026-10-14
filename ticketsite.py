@@ -86,7 +86,10 @@ class _Browser:
         self.used = 0
 
     def _ensure_page(self):
-        if self._broken or self.used >= self._MAX_PAGES:
+        if self._broken:
+            return None
+        if self.used >= self._MAX_PAGES:
+            print(f"    ブラウザで開く上限({self._MAX_PAGES}ページ)に達しています")
             return None
         if self._page is not None:
             return self._page
@@ -460,10 +463,12 @@ def fetch_event(url: str) -> Optional[dict]:
     """LivePocket / TiGET のイベントページを解析して共通形式の dict を返す。"""
     site = site_of(url)
     if not site:
+        print(f"    対応していないURLです: {url[:70]}")
         return None
     url = canonical_url(url)
     html = _get(url)
     if not html:
+        print(f"    ページを取れませんでした: {url[:70]}")
         return None
     block = _ldjson_block(html)
     if not block:
