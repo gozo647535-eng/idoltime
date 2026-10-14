@@ -793,7 +793,7 @@ def run_gcal() -> int:
 
 # 1回のフル実行で e+ を見るグループ数。解決済みURLはキャッシュするので
 # 2回目以降は1グループ1リクエストで済む。
-EPLUS_BATCH = int(os.environ.get("EPLUS_BATCH", "60"))
+EPLUS_BATCH = int(os.environ.get("EPLUS_BATCH") or 60)
 
 
 def build_eplus_row(slug: str, name: str, page_url: str, ev: dict) -> Optional[dict]:
@@ -931,17 +931,17 @@ def merge_site_events(jsonld_events, gemini_events):
 # 1回に巡回する公式サイトの数。実測で1組17〜26秒(JS描画+サブページ取得)かかり、
 # 65組だとフル巡回42分の半分以上をここで使っていた。一方 LLM の日次枠で実際に
 # 抽出できるのは十数組で、残りは取得時間を払うだけになっていた。枠に見合う数に絞る。
-SITE_BATCH = int(os.environ.get("SITE_BATCH", "30"))
+SITE_BATCH = int(os.environ.get("SITE_BATCH") or 30)
 # LLMが連続でこの回数使えなければ、その回の公式サイト巡回は打ち切る
-LLM_DEAD_LIMIT = int(os.environ.get("LLM_DEAD_LIMIT", "8"))
+LLM_DEAD_LIMIT = int(os.environ.get("LLM_DEAD_LIMIT") or 8)
 # TimeTree も同様。1カレンダーはAPI1回だが、各イベントの TicketDive 補完に
 # 通信が入るため件数に比例して伸びる。
-TT_BATCH = int(os.environ.get("TT_BATCH", "45"))
+TT_BATCH = int(os.environ.get("TT_BATCH") or 45)
 
 
 # 公演がこの日数内のグループを「直前」として先に巡回する。出演時刻は公演の
 # 直前に書き込まれるため、ここを過ぎてから読んでも間に合わない。
-IMMINENT_DAYS = int(os.environ.get("IMMINENT_DAYS", "4"))
+IMMINENT_DAYS = int(os.environ.get("IMMINENT_DAYS") or 4)
 # 1回の巡回枠のうち、直前のグループに割り当てる割合。全部を直前優先にすると
 # 出演予定が無いグループ(=取り込めていないグループ)がいつまでも読まれない。
 IMMINENT_SHARE = float(os.environ.get("IMMINENT_SHARE", "0.6"))
@@ -1441,7 +1441,7 @@ YRT_QUERIES = [
 # 発見は1日5回なので、378グループを約1.7日で一周する。
 # GitHub Actions 無料枠(2,000分/月)の残りは実測で約350分/月なので、
 # 5回×2.3分×30日 ≒ 345分 で収まる。
-GROUP_QUERY_BATCH = int(os.environ.get("GROUP_QUERY_BATCH", "45"))
+GROUP_QUERY_BATCH = int(os.environ.get("GROUP_QUERY_BATCH") or 45)
 
 
 def _group_search_queries(today: str) -> List[dict]:
@@ -1506,7 +1506,7 @@ def _group_search_queries(today: str) -> List[dict]:
 
 
 # 1回の実行で公式サイトを探すグループ数の上限(候補ごとに取得が入るため)
-SITE_DISCOVERY_LIMIT = int(os.environ.get("SITE_DISCOVERY_LIMIT", "20"))
+SITE_DISCOVERY_LIMIT = int(os.environ.get("SITE_DISCOVERY_LIMIT") or 20)
 
 # 公式サイトではないホスト。投稿に出てくるURLの大半はこれらなので、先に落とす。
 _NOT_OFFICIAL_HOSTS = (
@@ -1693,12 +1693,12 @@ def _yrt_cache_key(source: str, url: str) -> str:
 
 # LivePocket の新着一覧を何ページ読むか(1ページ20件)。公開日が新しい順なので
 # 前回の巡回以降に公開されたぶんが入っていればよい。
-LIVEPOCKET_PAGES = int(os.environ.get("LIVEPOCKET_PAGES", "3"))
+LIVEPOCKET_PAGES = int(os.environ.get("LIVEPOCKET_PAGES") or 3)
 # そのうち実際にイベントページを取りに行く上限
-LIVEPOCKET_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_FETCH_LIMIT", "25"))
+LIVEPOCKET_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_FETCH_LIMIT") or 25)
 
 # 1回の巡回で読み直す、取り込み済みイベントページの上限
-YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT", "60"))
+YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT") or 60)
 
 
 def _source_of_url(url: str):
@@ -1830,11 +1830,11 @@ def run_livepocket() -> int:
 
 
 # TiGET のアイドルカテゴリ新着一覧を何ページ読むか(1ページ24件)
-TIGET_PAGES = int(os.environ.get("TIGET_PAGES", "2"))
+TIGET_PAGES = int(os.environ.get("TIGET_PAGES") or 2)
 # そのうち実際にイベントページを取りに行く上限
-TIGET_FETCH_LIMIT = int(os.environ.get("TIGET_FETCH_LIMIT", "50"))
+TIGET_FETCH_LIMIT = int(os.environ.get("TIGET_FETCH_LIMIT") or 50)
 # 一度読んだイベントページを、何日あけたら読み直すか
-TIGET_RECHECK_DAYS = int(os.environ.get("TIGET_RECHECK_DAYS", "7"))
+TIGET_RECHECK_DAYS = int(os.environ.get("TIGET_RECHECK_DAYS") or 7)
 
 
 def run_tiget() -> int:
@@ -2054,7 +2054,7 @@ def _ttx_source_slug(tweet_id: str, idol_slug: str) -> Optional[str]:
 
 
 # 1回の巡回で発売情報を入れ直すチケットページの上限
-SALE_REFRESH_LIMIT = int(os.environ.get("SALE_REFRESH_LIMIT", "40"))
+SALE_REFRESH_LIMIT = int(os.environ.get("SALE_REFRESH_LIMIT") or 40)
 
 
 def refresh_sale_info() -> int:
@@ -2264,6 +2264,11 @@ def main() -> int:
         return 0
     if os.environ.get("TIGET_ONLY", "").lower() == "true":
         run_tiget()
+        return 0
+    # 集めてあるリンクから発売日時・先着・券種を入れ直すだけのモード。
+    # 先着チケット一覧の中身を一気に埋めたいときに使う。
+    if os.environ.get("SALE_ONLY", "").lower() == "true":
+        refresh_sale_info()
         return 0
     # 一覧ページに実行環境からアクセスできるかの確認だけを行う(数秒)
     if os.environ.get("LISTING_CHECK", "").lower() == "true":

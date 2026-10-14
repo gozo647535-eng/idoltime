@@ -44,6 +44,14 @@ on:
         description: "TiGETの新着一覧のみ巡回(数分。先着の取り込み確認用)"
         type: boolean
         default: false
+      sale_only:
+        description: "集めてあるリンクから発売日時・先着・券種を入れ直すだけ(先着一覧の穴埋め)"
+        type: boolean
+        default: false
+      sale_refresh_limit:
+        description: "そのとき読む販売ページの上限(既定40)"
+        type: string
+        default: ""
       listing_check:
         description: "チケットサイトの一覧ページに到達できるかだけ確認(数秒)"
         type: boolean
@@ -108,6 +116,8 @@ jobs:
           GCAL_ONLY: ${{ github.event.inputs.gcal_only }}
           LIVEPOCKET_ONLY: ${{ github.event.inputs.livepocket_only }}
           TIGET_ONLY: ${{ github.event.inputs.tiget_only }}
+          SALE_ONLY: ${{ github.event.inputs.sale_only }}
+          SALE_REFRESH_LIMIT: ${{ github.event.inputs.sale_refresh_limit }}
           YRT_FORCE: ${{ github.event.inputs.yrt_force }}
           LISTING_CHECK: ${{ github.event.inputs.listing_check }}
           LISTING_CHECK_URLS: ${{ github.event.inputs.listing_check_urls }}
