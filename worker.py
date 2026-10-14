@@ -2093,10 +2093,15 @@ def refresh_sale_info() -> int:
         key=lambda u: (all(r.get("sale_datetime") for r in by_url[u]),
                        last.get(f"sale:{u}") or ""),
     )
-    filled = 0
+    # 当日すでに読んだものは上限を数える前に外す。あとで外すと、上限の枠を
+    # 読まないURLで使い切ってしまう(1回の巡回で40件読むつもりが0件になっていた)。
+    if os.environ.get("SALE_FORCE", "").lower() not in ("1", "true"):
+        cand = [u for u in cand if last.get(f"sale:{u}") != today]
+    if not cand:
+        return 0
+    filled = read = failed = nosale = 0
     for url in cand[:SALE_REFRESH_LIMIT]:
-        if last.get(f"sale:{url}") == today:
-            continue
+        read += 1
         source = _source_of_url(url)
         info = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
         try:
@@ -2104,6 +2109,7 @@ def refresh_sale_info() -> int:
         except Exception:
             pass
         if not info:
+            failed += 1
             continue
         patch = {
             "sale_datetime": to_timestamptz(info.get("sale_datetime")),
@@ -2112,6 +2118,7 @@ def refresh_sale_info() -> int:
         }
         if not patch["sale_datetime"]:
             # 読めたのに発売日時が無いことが続くと原因が分からないので残す
+            nosale += 1
             print(f"    発売日時が見つかりません: {url[:70]}")
             continue  # 取れないなら上書きしない
         for r in by_url[url]:
@@ -2120,8 +2127,9 @@ def refresh_sale_info() -> int:
                 filled += 1
             except Exception as e:
                 print(f"  発売情報の書き込みに失敗 {r['tweet_id'][:40]}: {e}")
-    if filled:
-        print(f"発売情報を入れ直し: {filled} 行 / 読んだページ {min(len(cand), SALE_REFRESH_LIMIT)} 件")
+    print(f"発売情報を入れ直し: {filled} 行 / 読んだページ {read} 件"
+          f"(取得できず {failed} 件 / 発売日時なし {nosale} 件)"
+          f" / 未着手 {max(0, len(cand) - read)} 件")
     return filled
 
 
