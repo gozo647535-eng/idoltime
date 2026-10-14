@@ -64,6 +64,20 @@ def bot_wall(html: Optional[str]) -> bool:
     return len(html) < 20000 and any(m in html for m in _WALL_MARKS)
 
 
+def needs_browser(html) -> bool:
+    """素の取得が通らなかったか。通らなかったときだけブラウザで開き直す。
+
+    LivePocket はデータセンターからの取得に対して、認証ページを返すだけでなく
+    「HTTP 200 で本文が空」を返すこともある。これを成功として扱っていたため、
+    発売日時がいつまでも入らなかった(本文0字で19件すべて取得できず)。
+    """
+    if html is _BLOCKED:
+        return True
+    if html is None:
+        return False  # 通信そのものの失敗。ブラウザでも結果は変わらない
+    return bot_wall(html) or len(html.strip()) < 500
+
+
 class _Browser:
     """ボット対策が求める「JavaScript を実行する本物のブラウザ」として開く。
 
@@ -227,7 +241,7 @@ def _http_get(url: str, timeout: int = 20) -> Optional[str]:
 def _get(url: str, timeout: int = 20) -> Optional[str]:
     """ページを取る。ボット対策で阻まれたときだけブラウザで開き直す。"""
     html = _http_get(url, timeout)
-    if html is _BLOCKED or bot_wall(html):
+    if needs_browser(html):
         return _BROWSER.get(url)
     return html
 
@@ -569,9 +583,9 @@ def _get_listing(url: str, timeout: int = 25):
         if r.headers.get("Content-Encoding") == "gzip":
             data = gzip.decompress(data)
         html = data.decode("utf-8", "replace")
-        if not html.strip():
-            print(f"    一覧の本文が空です(HTTP {r.status} / {len(data)}バイト): {url[:70]}")
-        if bot_wall(html):
+        if needs_browser(html):
+            if not html.strip():
+                print(f"    一覧の本文が空です(HTTP {r.status})ためブラウザで開きます")
             return _BROWSER.get(url)
         return html
     except urllib.error.HTTPError as e:
