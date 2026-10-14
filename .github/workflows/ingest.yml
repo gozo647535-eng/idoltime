@@ -48,6 +48,10 @@ on:
         description: "集めてあるリンクから発売日時・先着・券種を入れ直すだけ(先着一覧の穴埋め)"
         type: boolean
         default: false
+      sale_urls:
+        description: "読み直す販売ページをカンマ区切りで指定(省略時は自動で選ぶ)"
+        type: string
+        default: ""
       sale_force:
         description: "当日すでに読んだ販売ページも読み直す"
         type: boolean
@@ -123,6 +127,7 @@ jobs:
           SALE_ONLY: ${{ github.event.inputs.sale_only }}
           SALE_REFRESH_LIMIT: ${{ github.event.inputs.sale_refresh_limit }}
           SALE_FORCE: ${{ github.event.inputs.sale_force }}
+          SALE_URLS: ${{ github.event.inputs.sale_urls }}
           YRT_FORCE: ${{ github.event.inputs.yrt_force }}
           LISTING_CHECK: ${{ github.event.inputs.listing_check }}
           LISTING_CHECK_URLS: ${{ github.event.inputs.listing_check_urls }}

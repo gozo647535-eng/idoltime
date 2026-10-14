@@ -2095,7 +2095,15 @@ def refresh_sale_info() -> int:
     )
     # 当日すでに読んだものは上限を数える前に外す。あとで外すと、上限の枠を
     # 読まないURLで使い切ってしまう(1回の巡回で40件読むつもりが0件になっていた)。
-    if os.environ.get("SALE_FORCE", "").lower() not in ("1", "true"):
+    force = os.environ.get("SALE_FORCE", "").lower() in ("1", "true")
+    only = [u.strip() for u in os.environ.get("SALE_URLS", "").split(",") if u.strip()]
+    if only:
+        # 指定したページだけを読み直す(入らないページの切り分け用)
+        cand = [u for u in cand if u in set(only)]
+        missing = [u for u in only if u not in by_url]
+        if missing:
+            print(f"  指定されたが対象に無いURL: {len(missing)} 件 {missing[:3]}")
+    elif not force:
         cand = [u for u in cand if last.get(f"sale:{u}") != today]
     if not cand:
         return 0
@@ -2104,6 +2112,8 @@ def refresh_sale_info() -> int:
     filled = read = failed = nosale = 0
     for url in cand[:SALE_REFRESH_LIMIT]:
         read += 1
+        if only:
+            print(f"  読む: {url[:70]} ({len(by_url[url])}行)")
         source = _source_of_url(url)
         info = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
         try:
