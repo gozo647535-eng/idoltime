@@ -2111,9 +2111,19 @@ def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict
     date = card.get("date") or d.get("date")
     start = card.get("time") or d.get("time")
     num = (d.get("numbering") or {})
+    # 事前販売と言い切れるのは、受付開始の分かる販売ページがあるときだけ。
+    # 文面だけで「事前」と読むと当日配布のものまで拾ってしまう(実測で
+    # 9件中4件が当日配布だった)。LINEアプリ発券は当日その場ではないので別扱い。
     numbering = None
     if num.get("numbered"):
-        numbering = "advance" if (num.get("advance") or ticket) else "onsite"
+        if ticket and ticket.get("sale_datetime"):
+            numbering = "advance"
+        elif num.get("line"):
+            numbering = "line"
+        elif num.get("advance"):
+            numbering = "advance"
+        else:
+            numbering = "onsite"
     ticket_url = (d.get("ticket_urls") or [None])[0]
     note = {
         "numbering": numbering,
@@ -2246,10 +2256,10 @@ def run_release() -> int:
         return 0
     notes = [json.loads(r["raw_text"]) for r in rows]
     numbered = sum(1 for n in notes if n.get("numbering"))
-    advance = sum(1 for n in notes if n.get("numbering") == "advance")
+    advance = sum(1 for n in notes if n.get("numbering") in ("advance", "line"))
     print(f"リリイベ取り込み完了: {len(rows)} 件 / 読んだ詳細 {read} 件 / "
           f"図鑑に当たった {matched} 件 / 整理番号あり {numbered} 件"
-          f"(うち事前 {advance} 件) / 事前販売ページを読めた {with_ticket} 件")
+          f"(うち当日より前に動くもの {advance} 件) / 事前販売ページを読めた {with_ticket} 件")
     return len(rows)
 
 

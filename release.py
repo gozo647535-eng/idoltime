@@ -65,14 +65,22 @@ def _text(s: str) -> str:
 
 # 「整理番号」「優先入場券」など、入場順が決まる仕組みがあることを示す言葉
 _NUMBERED_RE = re.compile(r"整理番号|整理券|優先入場|入場整理|入場順")
-# 当日の店頭配布ではなく、事前に売り出すことを示す言葉
-_ADVANCE_RE = re.compile(r"事前|前売|WEB販売|ウェブ販売|オンライン(?:にて)?(?:販売|受付)|抽選受付|申込")
+# 当日の店頭配布ではなく、事前に売り出す・受け付けることを示す言葉。
+# 「事前」だけだと「事前にご確認ください」まで拾ってしまうので、後ろに
+# 販売・受付・応募・予約・発券が続くものに限る。
+_ADVANCE_RE = re.compile(
+    r"事前(?:販売|受付|応募|予約|発券|購入)|前売|"
+    r"(?:WEB|ウェブ|オンライン|ネット)(?:にて)?(?:販売|受付|発券|申込)|抽選受付"
+)
+# LINEアプリで整理券を出す店舗イベントが実際に多い。当日その場ではなく
+# 先に動く必要があるので、当日配布とは分けて見せる。
+_LINE_RE = re.compile(r"LINE\s*アプリ|LINEアプリ|LINE公式アカウント")
 
 
 def numbering(text: str) -> dict:
     """整理番号まわりの読み取り。
 
-    返り値 {"numbered": bool, "advance": bool, "lines": [該当行]}。
+    返り値 {"numbered": bool, "advance": bool, "line": bool, "lines": [該当行]}。
     lines は画面にそのまま出せるよう、該当した行だけを短く持つ。
     """
     lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
@@ -80,6 +88,7 @@ def numbering(text: str) -> dict:
     return {
         "numbered": bool(hit),
         "advance": any(_ADVANCE_RE.search(l) for l in hit),
+        "line": any(_LINE_RE.search(l) for l in hit),
         "lines": [l[:120] for l in hit[:4]],
     }
 
