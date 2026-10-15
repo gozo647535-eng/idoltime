@@ -2064,6 +2064,9 @@ RELEASE_HMV_PAGES = int(os.environ.get("RELEASE_HMV_PAGES") or 2)
 RELEASE_DETAIL_LIMIT = int(os.environ.get("RELEASE_DETAIL_LIMIT") or 120)
 # 一度読んだ詳細ページを、何日あけたら読み直すか
 RELEASE_RECHECK_DAYS = int(os.environ.get("RELEASE_RECHECK_DAYS") or 5)
+# ヴィレヴァンの詳細は1件ごとにブラウザが要るので、1回に読む本数を絞る
+# (ブラウザで開ける上限はLivePocketと分け合うため)
+RELEASE_VV_LIMIT = int(os.environ.get("RELEASE_VV_LIMIT") or 15)
 
 
 def _rel_key(url: str) -> str:
@@ -2118,7 +2121,10 @@ def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict
         "note": num.get("lines") or [],
     }
     return {
-        "tweet_id": f"rel:{card['source']}:{card['url'].rstrip('/').rsplit('/', 1)[-1]}",
+        # 同じイベントページが「10/16 14:00 / 16:30 / 18:30」のように
+        # 回ごとに並ぶ(実測: 80行中11ページが重複)。日時まで入れて1回=1行にする
+        "tweet_id": (f"rel:{card['source']}:{card['url'].rstrip('/').rsplit('/', 1)[-1]}"
+                     f":{(date or '').replace('-', '')}{(start or '').replace(':', '')}"),
         "idol_slug": slug,
         "account": f"release:{card['source']}",
         "event_name": card.get("name"),
@@ -2184,17 +2190,28 @@ def run_release() -> int:
 
     lineup_idx = lineup.build_index(build_idol_name_list())
     rows, read, matched, with_ticket = [], 0, 0, 0
+    seen_detail: dict = {}  # 同じページが回ごとに並ぶので、1回の巡回では1度だけ読む
+    vv_read = 0
     for card in due[:RELEASE_DETAIL_LIMIT]:
-        read += 1
-        detail = None
-        try:
-            detail = release.fetch_detail(card["url"], render=(card["source"] == "vv"))
-        except Exception as e:
-            print(f"    詳細の取得に失敗 {card['url'][:60]}: {type(e).__name__} {e}")
-        try:
-            sb.set_last_seen(_rel_key(card["url"]), today)
-        except Exception:
-            pass
+        url = card["url"]
+        if url in seen_detail:
+            detail = seen_detail[url]
+        else:
+            if card["source"] == "vv":
+                if vv_read >= RELEASE_VV_LIMIT:
+                    continue  # 残りは次の巡回で
+                vv_read += 1
+            read += 1
+            detail = None
+            try:
+                detail = release.fetch_detail(url, render=(card["source"] == "vv"))
+            except Exception as e:
+                print(f"    詳細の取得に失敗 {url[:60]}: {type(e).__name__} {e}")
+            seen_detail[url] = detail
+            try:
+                sb.set_last_seen(_rel_key(url), today)
+            except Exception:
+                pass
         date = card.get("date") or (detail or {}).get("date")
         if not date or date < today:
             continue  # 終了済み、または日付が読めないものは入れない
@@ -2216,6 +2233,12 @@ def run_release() -> int:
             matched += 1
         rows.append(_release_row(card, detail, slug, ticket))
 
+    # 念のため、同じ tweet_id が2つ以上あれば落とす
+    # (PostgREST は同じキーを含む一括 upsert を 500 で返す)
+    uniq = {r["tweet_id"]: r for r in rows}
+    if len(uniq) != len(rows):
+        print(f"  同じキーの行を {len(rows) - len(uniq)} 件まとめました")
+    rows = list(uniq.values())
     try:
         sb.upsert_auto_events(rows)
     except Exception as e:
