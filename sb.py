@@ -104,17 +104,8 @@ def _request(method, path, params=None, body=None, headers=None):
 
 # auto_events に後から足した列。SQL を実行していない環境では落とす。無ければ書き込みから外す
 # (列が無いまま POST すると PostgREST が 400 を返し、その回が丸ごと失敗する)。
-# kind: 行の種類。リリイベは "release"
-# numbering: 整理番号の出し方。"advance"(事前に販売) / "onsite"(当日配布)
-# performer: 出演者名。図鑑に無いアーティストでも画面に出せるようにする
-OPTIONAL_COLUMNS = ("stage_time", "kind", "numbering", "performer")
+OPTIONAL_COLUMNS = ("stage_time",)
 _available_columns = None
-
-
-def has_column(name: str) -> bool:
-    """auto_events にその列があるか(1度だけ確かめて覚える)。"""
-    _drop_missing_columns([])
-    return name in (_available_columns or set())
 
 
 def _drop_missing_columns(rows):

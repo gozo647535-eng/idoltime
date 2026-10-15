@@ -2096,6 +2096,14 @@ def _release_slug(card: dict, detail: Optional[dict], lineup_idx):
 
 
 def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict]) -> dict:
+    """リリイベ1件を auto_events の行にする。
+
+    リリイベ固有の中身(整理番号の出し方・出演者名)を入れる列は無いので、
+    既にある列だけで収める。auto_events への列追加はダッシュボードからしか
+    できず、取り込みワーカーの持つキーでは実行できないため。
+      account  : "release:tower" のような取り込み元。一覧はこれで絞る
+      raw_text : {"numbering","performer","note"} の JSON
+    """
     d = detail or {}
     date = card.get("date") or d.get("date")
     start = card.get("time") or d.get("time")
@@ -2104,13 +2112,15 @@ def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict
     if num.get("numbered"):
         numbering = "advance" if (num.get("advance") or ticket) else "onsite"
     ticket_url = (d.get("ticket_urls") or [None])[0]
+    note = {
+        "numbering": numbering,
+        "performer": card.get("artist") or d.get("cast") or None,
+        "note": num.get("lines") or [],
+    }
     return {
         "tweet_id": f"rel:{card['source']}:{card['url'].rstrip('/').rsplit('/', 1)[-1]}",
         "idol_slug": slug,
         "account": f"release:{card['source']}",
-        "kind": "release",
-        "numbering": numbering,
-        "performer": card.get("artist") or d.get("cast") or None,
         "event_name": card.get("name"),
         "event_datetime": date,
         "open_time": start,
@@ -2121,7 +2131,7 @@ def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict
         "ticket_types": (ticket or {}).get("ticket_types") or [],
         "max_tickets": None,
         "other_details": clean_venue(card.get("store") or d.get("place")),
-        "raw_text": "\n".join(num.get("lines") or []) or None,
+        "raw_text": json.dumps(note, ensure_ascii=False),
         "tweet_url": card["url"],
     }
 
@@ -2140,14 +2150,6 @@ def run_release() -> int:
     """
     if os.environ.get("RELEASE_LISTING") == "0":
         print("リリイベの巡回は無効化されています(RELEASE_LISTING=0)")
-        return 0
-    # kind 列が無いと、書いた行をリリイベとして取り出せないばかりか、
-    # 他の一覧(ホームの発見・日付検索)に混ざってしまう。列ができるまでは
-    # 1行も書かずに、必要な SQL だけ知らせる。
-    if not sb.has_column("kind"):
-        print("リリイベ: auto_events に kind 列が無いので取り込みを見送ります。"
-              "Supabase の SQL Editor で supabase/schema.sql の alter 文"
-              "(kind / numbering / performer)を実行してください。")
         return 0
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     cards = []
@@ -2219,8 +2221,9 @@ def run_release() -> int:
     except Exception as e:
         print(f"リリイベの書き込みに失敗({len(rows)}件): {e}")
         return 0
-    numbered = sum(1 for r in rows if r.get("numbering"))
-    advance = sum(1 for r in rows if r.get("numbering") == "advance")
+    notes = [json.loads(r["raw_text"]) for r in rows]
+    numbered = sum(1 for n in notes if n.get("numbering"))
+    advance = sum(1 for n in notes if n.get("numbering") == "advance")
     print(f"リリイベ取り込み完了: {len(rows)} 件 / 読んだ詳細 {read} 件 / "
           f"図鑑に当たった {matched} 件 / 整理番号あり {numbered} 件"
           f"(うち事前 {advance} 件) / 事前販売ページを読めた {with_ticket} 件")
