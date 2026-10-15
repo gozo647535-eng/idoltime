@@ -439,11 +439,12 @@ def _livepocket_sale(lines):
     return None
 
 
-# 券種名の下に出る販売状況のラベル。券種名と間違えて拾わないように除く
-# (「予定販売数終了」「売切間近」が券種名として保存されていた)
+# 券種名の下に出る販売状況・取扱いのラベル。券種名と間違えて拾わないように除く
+# (「予定販売数終了」「売切間近」「分配不可」が券種名として保存されていた)
 _LP_BADGE = re.compile(
     r"^(?:販売(?:中|前|開始前|終了|休止中)|予定販売数終了|売(?:切|り切れ)(?:間近)?|"
     r"完売(?:間近)?|受付(?:中|前|終了)|残り(?:わずか|少)|キャンセル待ち|"
+    r"分配(?:可|不可|可能)|譲渡(?:可|不可)|電子チケット|"
     r"取扱(?:終了|開始前)|[¥￥（(].*)$")
 
 
@@ -461,7 +462,7 @@ def _livepocket_ticket_types(lines):
             cand = lines[i - back]
             if _LP_BADGE.match(cand):
                 continue
-            if 1 <= len(cand) <= 40:
+            if 1 <= len(cand) <= 40 and price.replace(",", "") != "0":
                 out.append({"name": cand, "price": f"{price}円"})
             break
     # 同じ券種が複数回出ることがあるので重複を除く
@@ -530,8 +531,11 @@ def fetch_event(url: str) -> Optional[dict]:
         price = mp.group(1).replace(",", "")
     sale = _sale_datetime(_json_string(block, "validFrom") or "")
     lines = _page_lines(html)
+    # 0円は「価格の記載が無い」という意味で入っていることがあるので持たない
     ticket_types = (
-        [{"name": "チケット", "price": f"{int(price):,}円"}] if price and price.isdigit() else []
+        [{"name": "チケット", "price": f"{int(price):,}円"}]
+        if price and price.isdigit() and int(price) > 0
+        else []
     )
     if site == "livepocket":
         # JSON-LD に無い発売開始・券種は本文から取る
