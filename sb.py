@@ -111,6 +111,12 @@ OPTIONAL_COLUMNS = ("stage_time", "kind", "numbering", "performer")
 _available_columns = None
 
 
+def has_column(name: str) -> bool:
+    """auto_events にその列があるか(1度だけ確かめて覚える)。"""
+    _drop_missing_columns([])
+    return name in (_available_columns or set())
+
+
 def _drop_missing_columns(rows):
     global _available_columns
     if _available_columns is None:

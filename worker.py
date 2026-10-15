@@ -2141,6 +2141,14 @@ def run_release() -> int:
     if os.environ.get("RELEASE_LISTING") == "0":
         print("リリイベの巡回は無効化されています(RELEASE_LISTING=0)")
         return 0
+    # kind 列が無いと、書いた行をリリイベとして取り出せないばかりか、
+    # 他の一覧(ホームの発見・日付検索)に混ざってしまう。列ができるまでは
+    # 1行も書かずに、必要な SQL だけ知らせる。
+    if not sb.has_column("kind"):
+        print("リリイベ: auto_events に kind 列が無いので取り込みを見送ります。"
+              "Supabase の SQL Editor で supabase/schema.sql の alter 文"
+              "(kind / numbering / performer)を実行してください。")
+        return 0
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     cards = []
     for name, fn in (
