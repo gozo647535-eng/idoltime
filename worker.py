@@ -36,6 +36,7 @@ import notetime
 import venuetext  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
 import ticketsite  # LivePocket / TiGET イベントページの構造化パーサ
+import release  # 店舗のリリースイベント(タワレコ/HMV/ヴィレヴァン)
 import yahoo_rt  # Yahoo!リアルタイム検索からのチケットサイト・イベント発見
 from watchlist import (
     build_idol_name_list,
@@ -2053,6 +2054,171 @@ def _ttx_source_slug(tweet_id: str, idol_slug: str) -> Optional[str]:
     return parts[0] if len(parts) == 3 else None
 
 
+# ---------------------------------------------------------- リリイベ巡回
+
+# タワーレコードの店舗イベント一覧を何ページ読むか(1ページ20件)
+RELEASE_TOWER_PAGES = int(os.environ.get("RELEASE_TOWER_PAGES") or 14)
+# HMVの店舗イベント一覧を何ページ読むか
+RELEASE_HMV_PAGES = int(os.environ.get("RELEASE_HMV_PAGES") or 2)
+# 1回の巡回で詳細ページを読む上限(整理番号とチケットリンクはここでしか分からない)
+RELEASE_DETAIL_LIMIT = int(os.environ.get("RELEASE_DETAIL_LIMIT") or 120)
+# 一度読んだ詳細ページを、何日あけたら読み直すか
+RELEASE_RECHECK_DAYS = int(os.environ.get("RELEASE_RECHECK_DAYS") or 5)
+
+
+def _rel_key(url: str) -> str:
+    return "rel:" + url
+
+
+def _days_since(day: Optional[str], today: str) -> int:
+    """YYYY-MM-DD の差。読んだ記録が無ければ大きい数を返す。"""
+    if not day:
+        return 9999
+    try:
+        a = datetime.datetime.strptime(day, "%Y-%m-%d").date()
+        b = datetime.datetime.strptime(today, "%Y-%m-%d").date()
+        return (b - a).days
+    except ValueError:
+        return 9999
+
+
+def _release_slug(card: dict, detail: Optional[dict], lineup_idx):
+    """出演欄・イベント名から図鑑のグループを探す。見つからなければ None。
+
+    リリイベは女性アイドルに限らず集めるので、図鑑に無くても行は作る。
+    slug が付いた行だけが、お気に入りの出演にも出る。
+    """
+    text = "\n".join(filter(None, [
+        card.get("artist"), (detail or {}).get("cast"), card.get("name"),
+    ]))
+    names = lineup.names_in_text(text, lineup_idx) if text else []
+    return names[0][1] if names and isinstance(names[0], (list, tuple)) else None
+
+
+def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict]) -> dict:
+    d = detail or {}
+    date = card.get("date") or d.get("date")
+    start = card.get("time") or d.get("time")
+    num = (d.get("numbering") or {})
+    numbering = None
+    if num.get("numbered"):
+        numbering = "advance" if (num.get("advance") or ticket) else "onsite"
+    ticket_url = (d.get("ticket_urls") or [None])[0]
+    return {
+        "tweet_id": f"rel:{card['source']}:{card['url'].rstrip('/').rsplit('/', 1)[-1]}",
+        "idol_slug": slug,
+        "account": f"release:{card['source']}",
+        "kind": "release",
+        "numbering": numbering,
+        "performer": card.get("artist") or d.get("cast") or None,
+        "event_name": card.get("name"),
+        "event_datetime": date,
+        "open_time": start,
+        "entry_time": None,
+        "sale_datetime": to_timestamptz((ticket or {}).get("sale_datetime")),
+        "is_first_come": bool((ticket or {}).get("is_first_come")),
+        "ticket_url": ticket_url,
+        "ticket_types": (ticket or {}).get("ticket_types") or [],
+        "max_tickets": None,
+        "other_details": clean_venue(card.get("store") or d.get("place")),
+        "raw_text": "\n".join(num.get("lines") or []) or None,
+        "tweet_url": card["url"],
+    }
+
+
+def run_release() -> int:
+    """店舗のリリースイベント(インストアイベント)を取り込む。
+
+    タワーレコード・HMV・ヴィレッジヴァンガードの店舗イベント一覧を読み、
+    詳細ページから整理番号の案内と、事前に整理番号を売るチケットページを拾う。
+    女性アイドルに限らず集めるので、図鑑に無いアーティストの行も作る
+    (図鑑に当たったものだけ idol_slug が付き、お気に入りの出演にも出る)。
+
+    詳細ページは件数が多いので、開催日の近い順に RELEASE_DETAIL_LIMIT 件ずつ、
+    一度読んだものは RELEASE_RECHECK_DAYS 日あけて読み直す。
+    RELEASE_LISTING=0 で止められる。
+    """
+    if os.environ.get("RELEASE_LISTING") == "0":
+        print("リリイベの巡回は無効化されています(RELEASE_LISTING=0)")
+        return 0
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    cards = []
+    for name, fn in (
+        ("タワーレコード", lambda: release.tower_listing(pages=RELEASE_TOWER_PAGES)),
+        ("HMV", lambda: release.hmv_listing(pages=RELEASE_HMV_PAGES)),
+        ("ヴィレヴァン", release.vv_listing),
+    ):
+        try:
+            got = fn()
+        except Exception as e:
+            print(f"  {name}の一覧を取得できません: {type(e).__name__} {e}")
+            continue
+        print(f"  {name}: {len(got)} 件")
+        cards += got
+    if not cards:
+        print("リリイベ: 一覧からイベントを取れませんでした。")
+        return 0
+
+    # 終わった公演は入れない。日付が一覧に無いもの(ヴィレヴァン)は詳細で判断する
+    cards = [c for c in cards if not c.get("date") or c["date"] >= today]
+    try:
+        last = sb.get_last_seen_by_prefix("rel:")
+    except Exception:
+        last = {}
+    # 開催日の近い順。日付が分からないものは後回しにせず先に読む(終了判定のため)
+    cards.sort(key=lambda c: c.get("date") or "")
+    due = [c for c in cards
+           if _days_since(last.get(_rel_key(c["url"])), today) >= RELEASE_RECHECK_DAYS]
+    print(f"リリイベ: 今後の公演 {len(cards)} 件 / 詳細を読む {min(len(due), RELEASE_DETAIL_LIMIT)} 件"
+          f"(読み直しの時期でないもの {len(cards) - len(due)} 件)")
+
+    lineup_idx = lineup.build_index(build_idol_name_list())
+    rows, read, matched, with_ticket = [], 0, 0, 0
+    for card in due[:RELEASE_DETAIL_LIMIT]:
+        read += 1
+        detail = None
+        try:
+            detail = release.fetch_detail(card["url"], render=(card["source"] == "vv"))
+        except Exception as e:
+            print(f"    詳細の取得に失敗 {card['url'][:60]}: {type(e).__name__} {e}")
+        try:
+            sb.set_last_seen(_rel_key(card["url"]), today)
+        except Exception:
+            pass
+        date = card.get("date") or (detail or {}).get("date")
+        if not date or date < today:
+            continue  # 終了済み、または日付が読めないものは入れない
+        card["date"] = date
+        # 事前に整理番号や参加券を売るページがあれば、受付開始を読む
+        ticket = None
+        for url in (detail or {}).get("ticket_urls", [])[:1]:
+            source = _source_of_url(url)
+            if not source:
+                continue
+            try:
+                ticket = _td_info(url) if source == "ticketdive" else ticketsite.fetch_event(url)
+            except Exception as e:
+                print(f"    チケットページを読めません {url[:60]}: {type(e).__name__} {e}")
+            if ticket:
+                with_ticket += 1
+        slug = _release_slug(card, detail, lineup_idx)
+        if slug:
+            matched += 1
+        rows.append(_release_row(card, detail, slug, ticket))
+
+    try:
+        sb.upsert_auto_events(rows)
+    except Exception as e:
+        print(f"リリイベの書き込みに失敗({len(rows)}件): {e}")
+        return 0
+    numbered = sum(1 for r in rows if r.get("numbering"))
+    advance = sum(1 for r in rows if r.get("numbering") == "advance")
+    print(f"リリイベ取り込み完了: {len(rows)} 件 / 読んだ詳細 {read} 件 / "
+          f"図鑑に当たった {matched} 件 / 整理番号あり {numbered} 件"
+          f"(うち事前 {advance} 件) / 事前販売ページを読めた {with_ticket} 件")
+    return len(rows)
+
+
 # 1回の巡回で発売情報を入れ直すチケットページの上限。
 # 巡回は1日1回なので、40件だと対象470件を一周するのに10日以上かかり、
 # 入ったばかりのリンクは何日も発売日時が空のままだった(2026-10-14の巡回でも
@@ -2304,6 +2470,10 @@ def main() -> int:
     if os.environ.get("TIGET_ONLY", "").lower() == "true":
         run_tiget()
         return 0
+    # 店舗のリリースイベントだけを巡回する(数分)。
+    if os.environ.get("RELEASE_ONLY", "").lower() == "true":
+        run_release()
+        return 0
     # 集めてあるリンクから発売日時・先着・券種を入れ直すだけのモード。
     # 先着チケット一覧の中身を一気に埋めたいときに使う。
     if os.environ.get("SALE_ONLY", "").lower() == "true":
@@ -2324,6 +2494,7 @@ def main() -> int:
         run_yahoo_rt()
         run_livepocket()
         run_tiget()
+        run_release()
         refresh_sale_info()
         fix_ticket_urls()
         cleanup_orphan_rows()

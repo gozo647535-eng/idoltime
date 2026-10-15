@@ -44,6 +44,10 @@ on:
         description: "TiGETの新着一覧のみ巡回(数分。先着の取り込み確認用)"
         type: boolean
         default: false
+      release_only:
+        description: "店舗のリリースイベントのみ巡回(タワレコ/HMV/ヴィレヴァン。数分)"
+        type: boolean
+        default: false
       sale_only:
         description: "集めてあるリンクから発売日時・先着・券種を入れ直すだけ(先着一覧の穴埋め)"
         type: boolean
@@ -124,6 +128,7 @@ jobs:
           GCAL_ONLY: ${{ github.event.inputs.gcal_only }}
           LIVEPOCKET_ONLY: ${{ github.event.inputs.livepocket_only }}
           TIGET_ONLY: ${{ github.event.inputs.tiget_only }}
+          RELEASE_ONLY: ${{ github.event.inputs.release_only }}
           SALE_ONLY: ${{ github.event.inputs.sale_only }}
           SALE_REFRESH_LIMIT: ${{ github.event.inputs.sale_refresh_limit }}
           SALE_FORCE: ${{ github.event.inputs.sale_force }}

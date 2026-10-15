@@ -112,7 +112,11 @@ class _Browser:
         try:
             from playwright.sync_api import sync_playwright
             self._pw = sync_playwright().start()
+            # 実行環境によって Chromium の置き場所が違うので、必要なら
+            # BROWSER_EXECUTABLE で指定できるようにしておく
+            exe = os.environ.get("BROWSER_EXECUTABLE") or None
             self._browser = self._pw.chromium.launch(
+                executable_path=exe,
                 args=["--no-sandbox", "--disable-dev-shm-usage"])
             ctx = self._browser.new_context(
                 user_agent=UA, locale="ja-JP",
@@ -125,7 +129,14 @@ class _Browser:
             self.close()
         return self._page
 
-    def get(self, url: str, timeout: int = 30000) -> Optional[str]:
+    def get(self, url: str, timeout: int = 30000, wait_ms: int = 0,
+            wait_for: Optional[str] = None) -> Optional[str]:
+        """ブラウザで開いて HTML を返す。
+
+        wait_for を渡すと、その文字列が HTML に現れるまで待つ(最大 wait_ms)。
+        JavaScript で中身を作るページは domcontentloaded の時点では空なので、
+        リリイベ巡回のようにそういうページを読むときに使う。
+        """
         page = self._ensure_page()
         if page is None:
             return None
@@ -134,6 +145,13 @@ class _Browser:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=timeout)
             html = page.content()
+            if wait_ms:
+                waited = 0
+                step = 700
+                while waited < wait_ms and (wait_for is None or wait_for not in html):
+                    page.wait_for_timeout(step)
+                    waited += step
+                    html = page.content()
             # 認証ページが返ったら、ブラウザ側の JavaScript が済むのを待つ。
             # 認証は通常1回で終わり、同じクッキーが以降のページでも使える。
             for _ in range(3):
@@ -181,6 +199,17 @@ class _Browser:
 
 
 _BROWSER = _Browser()
+
+
+def render(url: str, timeout: int = 30000, wait_ms: int = 6000,
+           wait_for: Optional[str] = None) -> Optional[str]:
+    """JavaScript で中身を作るページを、実ブラウザで開いて HTML を返す。
+
+    リリイベ巡回(release.py)のように、素の取得では空のページしか返らない
+    サイトのために公開している。ブラウザは使い回す。
+    wait_for に目印の文字列を渡すと、それが現れるまで待つ。
+    """
+    return _BROWSER.get(url, timeout=timeout, wait_ms=wait_ms, wait_for=wait_for)
 
 
 def close_browser() -> None:
