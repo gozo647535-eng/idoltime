@@ -48,6 +48,10 @@ on:
         description: "店舗のリリースイベントのみ巡回(タワレコ/HMV/ヴィレヴァン。数分)"
         type: boolean
         default: false
+      release_force:
+        description: "リリイベの詳細を、読み直しの時期を待たず全部読み直す"
+        type: boolean
+        default: false
       sale_only:
         description: "集めてあるリンクから発売日時・先着・券種を入れ直すだけ(先着一覧の穴埋め)"
         type: boolean
@@ -129,6 +133,7 @@ jobs:
           LIVEPOCKET_ONLY: ${{ github.event.inputs.livepocket_only }}
           TIGET_ONLY: ${{ github.event.inputs.tiget_only }}
           RELEASE_ONLY: ${{ github.event.inputs.release_only }}
+          RELEASE_FORCE: ${{ github.event.inputs.release_force }}
           SALE_ONLY: ${{ github.event.inputs.sale_only }}
           SALE_REFRESH_LIMIT: ${{ github.event.inputs.sale_refresh_limit }}
           SALE_FORCE: ${{ github.event.inputs.sale_force }}

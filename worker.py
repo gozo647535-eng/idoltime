@@ -2061,7 +2061,9 @@ RELEASE_TOWER_PAGES = int(os.environ.get("RELEASE_TOWER_PAGES") or 14)
 # HMVの店舗イベント一覧を何ページ読むか
 RELEASE_HMV_PAGES = int(os.environ.get("RELEASE_HMV_PAGES") or 2)
 # 1回の巡回で詳細ページを読む上限(整理番号とチケットリンクはここでしか分からない)
-RELEASE_DETAIL_LIMIT = int(os.environ.get("RELEASE_DETAIL_LIMIT") or 120)
+# 実測: 詳細120件で約3.5分。1回の巡回の持ち時間(55分)には余裕があるので、
+# 対象(実測490件)を2回で一周できるところまで上げる
+RELEASE_DETAIL_LIMIT = int(os.environ.get("RELEASE_DETAIL_LIMIT") or 250)
 # 一度読んだ詳細ページを、何日あけたら読み直すか
 RELEASE_RECHECK_DAYS = int(os.environ.get("RELEASE_RECHECK_DAYS") or 5)
 # ヴィレヴァンの詳細は1件ごとにブラウザが要るので、1回に読む本数を絞る
@@ -2193,8 +2195,10 @@ def run_release() -> int:
         last = {}
     # 開催日の近い順。日付が分からないものは後回しにせず先に読む(終了判定のため)
     cards.sort(key=lambda c: c.get("date") or "")
+    # 読み取りの直し方を変えたときは、待たずに全部読み直せるようにしておく
+    force = os.environ.get("RELEASE_FORCE", "").lower() in ("1", "true")
     due = [c for c in cards
-           if _days_since(last.get(_rel_key(c["url"])), today) >= RELEASE_RECHECK_DAYS]
+           if force or _days_since(last.get(_rel_key(c["url"])), today) >= RELEASE_RECHECK_DAYS]
     print(f"リリイベ: 今後の公演 {len(cards)} 件 / 詳細を読む {min(len(due), RELEASE_DETAIL_LIMIT)} 件"
           f"(読み直しの時期でないもの {len(cards) - len(due)} 件)")
 
