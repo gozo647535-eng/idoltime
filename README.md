@@ -1,6 +1,6 @@
 # idoltime
 
-[IdolLife](https://idollife.vercel.app/) 用のチケット情報取り込みワーカー。
+[現場監督](https://genba-idol.vercel.app/) 用のチケット情報取り込みワーカー。
 
 2026-10-27 に非公開リポジトリ `idollife-ingest-worker` から移した。非公開だと
 GitHub Actions の無料枠(月2,000分)に収まらず、10月は24日で止まったため。
@@ -73,7 +73,7 @@ IdolLife 本体と同じ Supabase プロジェクトの SQL Editor で `worker_s
 - どうしても図鑑に無いアカウントを個別に追加したい場合のみ、`ACCOUNTS_JSON`(任意)に
   `[{"handle":"...","idol_slug":"artist:..."}]` を入れると手動で加えられます。
 - 図鑑のデータ元URLを変えたい場合は `CATALOG_URL` を Secret/環境変数で上書きできます
-  (既定: `https://idollife.vercel.app/catalog.json`)。
+  (既定: `https://genba-idol.vercel.app/catalog.json`)。
 
 ### 4. 実行
 - 6時間ごとに自動実行されます(`.github/workflows/ingest.yml` の cron を変更可能)。

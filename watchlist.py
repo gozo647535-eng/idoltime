@@ -13,7 +13,7 @@ from typing import Optional
 
 import sb
 
-CATALOG_URL = os.environ.get("CATALOG_URL", "https://idollife.vercel.app/catalog.json")
+CATALOG_URL = os.environ.get("CATALOG_URL", "https://genba-idol.vercel.app/catalog.json")
 ACCOUNTS_FILE = "accounts.json"
 # 公式サイト巡回から外すアイドルの slug 一覧(JSONの配列)。
 # 対バン中心のグループはチケットサイト発見側で拾えるため、公式サイトを巡回しても
