@@ -2275,6 +2275,53 @@ def run_release() -> int:
 SALE_REFRESH_LIMIT = int(os.environ.get("SALE_REFRESH_LIMIT") or 250)
 
 
+def share_sale_info(rows: list) -> int:
+    """同じ販売ページを指す行どうしで、発売情報をそろえる(ページは読まない)。
+
+    発売情報の入れ直しは「同じURLは1日1回」読む。そのため、読んだあとに
+    同じ公演を指す行が増えると(新しく足したカレンダー、対バンの相互反映)、
+    その行は翌日まで発売日時が空のままになり、先着の一覧に出ない。
+    実測(2026-10-27): ライポケのリンクがある今後の行300件のうち、同じURLの
+    別の行は発売日時を持っているのに空のままの行が38件(12ページ)あった。
+    グループのページにはライポケのリンクが出るのに先着の一覧には出ない、
+    という食い違いになる。
+
+    すでに分かっている情報を写すだけなので、ネットに取りに行かず、
+    何回実行しても負担が無い。yrt 行は Yahoo!リアルタイム検索の取り込みで
+    最新になるので写す元には使うが、書き換えない。
+    """
+    by_url: dict = {}
+    for r in rows:
+        if r.get("ticket_url"):
+            by_url.setdefault(r["ticket_url"], []).append(r)
+    shared = 0
+    for url, rs in by_url.items():
+        src = [r for r in rs if r.get("sale_datetime")]
+        dst = [r for r in rs if not r.get("sale_datetime") and not r["tweet_id"].startswith("yrt:")]
+        if not src or not dst:
+            continue
+        # 写す元どうしで値が違うときは、いちばん多い値を採る
+        counts: dict = {}
+        for r in src:
+            counts[r["sale_datetime"]] = counts.get(r["sale_datetime"], 0) + 1
+        sale = max(counts, key=counts.get)
+        base = next(r for r in src if r["sale_datetime"] == sale)
+        patch = {"sale_datetime": sale, "is_first_come": bool(base.get("is_first_come"))}
+        if base.get("ticket_types"):
+            patch["ticket_types"] = base["ticket_types"]
+        for r in dst:
+            try:
+                sb.patch_auto_event(r["tweet_id"], patch)
+            except Exception as e:
+                print(f"  発売情報を写すのに失敗 {r['tweet_id'][:40]}: {e}")
+                continue
+            r.update(patch)  # このあとの読む順番の決定に反映する
+            shared += 1
+    if shared:
+        print(f"同じ販売ページの行に発売情報を写した: {shared} 行")
+    return shared
+
+
 def refresh_sale_info() -> int:
     """カレンダー由来の行に、販売ページから発売日時・先着・券種を入れる。
 
@@ -2293,6 +2340,9 @@ def refresh_sale_info() -> int:
     except Exception as e:
         print(f"  発売情報の入れ直しに失敗(行の取得): {e}")
         return 0
+    # ページを読む前に、分かっている情報を同じURLの行へ写しておく。
+    # 写せた行は「発売情報あり」になるので、読む順番でも後ろに回る。
+    share_sale_info(rows)
     by_url: dict = {}
     for r in rows:
         url = r.get("ticket_url")
