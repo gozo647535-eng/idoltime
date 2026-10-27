@@ -1,6 +1,10 @@
-# idollife-ingest-worker
+# idoltime
 
 [IdolLife](https://idollife.vercel.app/) 用のチケット情報取り込みワーカー。
+
+2026-10-27 に非公開リポジトリ `idollife-ingest-worker` から移した。非公開だと
+GitHub Actions の無料枠(月2,000分)に収まらず、10月は24日で止まったため。
+公開リポジトリなら標準ランナーの実行時間は無料・無制限になる。
 
 図鑑に登録したアイドルの X アカウントを定期監視し、チケット投稿を Gemini(または
 正規表現フォールバック)で解析して、Supabase の `auto_events` テーブルへ書き込みます。
@@ -9,10 +13,13 @@ IdolLife 本体は、利用者がお気に入りにしたアイドルの分だ�
 元は X→Discord 通知ボット。解析ロジック(twikit / Gemini / Ticketdive スクレイプ)は
 そのまま流用し、出力先を Discord から Supabase に変更しています。
 
-> ⚠️ このリポジトリは**必ずプライベート**にしてください。ワーカーコードは公開しても
-> 問題ありませんが、機密情報(Xのcookie・Supabaseのservice_roleキー・Gemini鍵)は
-> **すべて GitHub Secrets** に置き、リポジトリには絶対にコミットしないでください
-> (`.gitignore` で `cookies.json` / `accounts.json` を除外済み)。
+> ⚠️ このリポジトリは**公開**されている。機密情報(Supabaseのservice_roleキー・
+> Groq/Geminiの鍵・Xのcookie)は**すべて GitHub Secrets** に置き、ファイルにも
+> コミットメッセージにも絶対に書かないこと(`.gitignore` で `cookies.json` /
+> `accounts.json` を除外済み)。Secrets に入れた値は公開されない。
+>
+> コミットの作者にも実際のメールアドレスを入れないこと。移すときに、履歴の
+> 作者アドレスは GitHub の匿名アドレスに書き換えてある。
 
 ## 仕組み
 
@@ -38,7 +45,12 @@ IdolLife 本体と同じ Supabase プロジェクトの SQL Editor で `worker_s
 |---|---|
 | `SUPABASE_URL` | `https://xxxx.supabase.co` |
 | `SUPABASE_SERVICE_KEY` | Supabaseダッシュボード → Project Settings → API → **service_role** キー(絶対非公開) |
-| `GEMINI_API_KEY` | Google AI Studio の Gemini API キー(未設定なら正規表現解析にフォールバック) |
+| `GROQ_API_KEY` | Groq console の API キー。公式サイトの文章を予定に変える一次エンジン |
+| `GEMINI_API_KEY` | Google AI Studio の Gemini API キー。Groq が無いときの予備 |
+
+**`GROQ_API_KEY` と `GEMINI_API_KEY` の両方が無いと、公式サイトからは予定が1件も作られない。**
+(2026-10-27 の初回実行は両方未設定で、30サイトを巡回して0件だった。ページから日付は
+読めているのに、予定に変える工程が動かない。)
 | `X_COOKIES_JSON` | 既存ボットの `cookies.json` の**中身をそのまま**貼り付け |
 | `ACCOUNTS_JSON` | (任意)手動で追加ピン留めする監視リスト。通常は不要 |
 
