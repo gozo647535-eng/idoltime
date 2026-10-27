@@ -1742,6 +1742,68 @@ def _add_stored_yrt_urls(by_site: dict) -> int:
     return added
 
 
+# 1回の巡回で読む、カレンダーから入ったチケットページの上限。
+# 初回は700件ほどあるので、数日かけて読む(同じページはその日のうちに読み直さない)。
+CALENDAR_URL_LIMIT = int(os.environ.get("CALENDAR_URL_LIMIT") or 80)
+# 読んで登録グループが1組も当たらなかったページを、次に読み直すまでの日数
+# (出演者は後から追加発表されるので、いつかは読み直す)
+CALENDAR_URL_RETRY_DAYS = 7
+
+
+def _add_calendar_ticket_urls(by_site: dict) -> int:
+    """カレンダー(TimeTree・Googleカレンダー)の予定に付いたチケットページを、
+    今回の取得対象に足す。
+
+    チケットページを読むと、出演者一覧にいる登録グループ全員にその公演の行が入る。
+    これまでは X の検索で見つけたページだけがこの処理を通り、カレンダーから
+    入ったページは発売情報を足すだけだった(refresh_sale_info)。そのため対バンでも、
+    カレンダーを持つ1組のページにしか公演が出なかった。実測(2026-10-27): 今後の
+    予定に付いたページのうち、出演者を読んでいないものが TicketDive 512/535件・
+    LivePocket 92/98件・TiGET 105/127件。
+
+    一度読んで行ができたページは _add_stored_yrt_urls が読み直すので、ここでは
+    まだ読んでいないもの(または、読んだが登録グループが当たらず、しばらく
+    経ったもの)だけを足す。公演日が近いものから。
+    """
+    now = datetime.datetime.now(JST)
+    today_str = now.strftime("%Y-%m-%d")
+    retry_before = (now - datetime.timedelta(days=CALENDAR_URL_RETRY_DAYS)).strftime("%Y-%m-%d")
+    try:
+        rows = sb.get_ticket_page_rows(today_str)
+    except Exception as e:
+        print(f"  カレンダーのチケットページの取得に失敗(読みません): {e}")
+        return 0
+    try:
+        last = sb.get_last_seen_by_prefix("yrtu:")
+    except Exception:
+        last = {}
+    known = {u for v in by_site.values() for u in v}
+    soonest: dict = {}
+    for r in rows:
+        url = r.get("ticket_url")
+        # 「t-dv.com/HEROINES-26102…」のように途中で切れた URL は読めない
+        if not url or r["tweet_id"].startswith("yrt:") or "…" in url:
+            continue
+        source = _source_of_url(url)
+        if not source or url in known:
+            continue
+        seen = last.get(_yrt_cache_key(source, url)) or ""
+        if seen and seen >= retry_before:
+            continue
+        date = (r.get("event_datetime") or "")[:10]
+        # 「t-dv.com/X」と「ticketdive.com/event/X」は同じページなので1件に数える
+        key = _yrt_cache_key(source, url)
+        if key not in soonest or date < soonest[key][0]:
+            soonest[key] = (date, source, url)
+    cand = sorted(soonest.values())
+    for _, source, url in cand[:CALENDAR_URL_LIMIT]:
+        by_site.setdefault(source, []).append(url)
+    n = min(len(cand), CALENDAR_URL_LIMIT)
+    if cand:
+        print(f"  カレンダーから入ったチケットページ: 未読 {len(cand)} 件のうち {n} 件を読む")
+    return n
+
+
 def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
     """チケットページ1件を読み、出演する登録グループぶんの行を書く。
 
@@ -1916,13 +1978,16 @@ def run_yahoo_rt(discover_sites: bool = True) -> int:
     # 販売元がページを直しても古いままになる(ツアーの会場が日程ごとに入った
     # フルコース「Bon Voyage」で、古い行だけ全日程が仙台Rensaのまま残った)。
     refreshed = _add_stored_yrt_urls(by_site)
+    # カレンダーの予定に付いたチケットページも、出演者を読んで共演グループに入れる
+    from_calendar = _add_calendar_ticket_urls(by_site)
 
     total_urls = sum(len(v) for v in by_site.values())
     if not total_urls:
         print("Yahooリアルタイム: チケットサイトのリンクは見つかりませんでした。")
         return 0
     print("Yahooリアルタイム: " + " / ".join(f"{k} {len(v)}件" for k, v in by_site.items())
-          + (f" / 取り込み済みの読み直し {refreshed}件" if refreshed else ""))
+          + (f" / 取り込み済みの読み直し {refreshed}件" if refreshed else "")
+          + (f" / カレンダーから {from_calendar}件" if from_calendar else ""))
 
     total = 0
     touched = set()
