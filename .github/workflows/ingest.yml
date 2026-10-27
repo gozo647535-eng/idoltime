@@ -10,8 +10,18 @@ on:
     # 公開リポジトリに移って実行時間の制約は無くなった(2026-10-27)。
     # 回数を増やすなら、取りに行く先のサイトへの負担を先に考えること。
     - cron: '37 1,13 * * *'
+    # ライポケ・TiGET の新着一覧だけを読む(1時間ごと・数分)。ライポケは公開から
+    # 発売までが短く、1日1回だけ一覧を読んでいたときは、ライポケの公演の56%を
+    # 発売が始まってから見つけていた(2026-10-27)。相手サイトへの取得は一覧の
+    # 数ページぶん(イベントページは同じものをその日のうちは読み直さない)。
+    # 毎時0分はGitHub側が混むので外し、ほかの定期実行とも重ならない分にする。
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
+      quick_listing:
+        description: "ライポケ・TiGETの新着一覧だけを読む(数分・1時間ごとの定期実行と同じ)"
+        type: boolean
+        default: false
       x_only:
         description: "Xのみ実行(twikit動作確認用・サイト巡回とTimeTreeをスキップ)"
         type: boolean
@@ -78,7 +88,11 @@ on:
         default: ""
 
 concurrency:
-  group: ingest
+  # 同じグループで待っている実行が2つになると、GitHub は古いほうを取り消す。
+  # 1時間ごとの新着一覧の実行がフル巡回を押しのけて取り消さないよう、
+  # 新着一覧だけの実行は別のグループにする(同時に走っても、書くのは
+  # 同じ行への upsert と空欄を埋めるだけなので、ぶつからない)。
+  group: ${{ (github.event.schedule == '17 * * * *' || github.event.inputs.quick_listing == 'true') && 'ingest-quick' || 'ingest' }}
   cancel-in-progress: false
 
 jobs:
@@ -129,6 +143,8 @@ jobs:
           PYTHONUNBUFFERED: "1"
           # 発見のみモード: 高頻度側の cron、または手動実行のチェックで有効になる
           DISCOVERY_ONLY: ${{ github.event.schedule == '37 1,13 * * *' || github.event.inputs.discovery_only == 'true' }}
+          # 新着一覧だけのモード: 1時間ごとの cron、または手動実行のチェックで有効になる
+          QUICK_LISTING: ${{ github.event.schedule == '17 * * * *' || github.event.inputs.quick_listing == 'true' }}
           # 公式サイト巡回のみ / 対象グループの限定(どちらも手動実行の切り分け用)
           SITE_ONLY: ${{ github.event.inputs.site_only }}
           SITE_SLUGS: ${{ github.event.inputs.site_slugs }}

@@ -1783,13 +1783,20 @@ def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
 
 
 def run_livepocket() -> int:
-    """LivePocket のアイドルカテゴリ新着一覧から、まだ発売前のものを取り込む。
+    """LivePocket のアイドルカテゴリ新着一覧から、販売前・販売中のものを取り込む。
 
     Yahoo!リアルタイム検索は X への投稿を拾う仕組みなので、投稿が無いイベントや
     投稿が発売直前のイベントは間に合わない。一覧を直接見れば公開された時点で拾える。
 
-    一覧に「販売前」の表示と出演者が載っているため、登録グループが出る販売前の
+    一覧に「販売前/販売中」の表示と出演者が載っているため、登録グループが出る
     ものだけに絞ってからイベントページを取りに行く(無駄な取得をしない)。
+
+    販売中も対象にするのは、ライポケは公開から発売までが短く、公開と同時に
+    発売が始まるものも多いため(新着60件のうち22件がすでに販売中だった,
+    2026-10-27)。販売前だけを拾っていたときは、それらはカレンダー経由で
+    見つかるのを待つことになり、ライポケの公演の56%を発売が始まってから
+    見つけていた(発売開始から中央値8日後)。読む回数のほうは、ワークフローの
+    QUICK_LISTING(1時間ごと)で増やしている。
 
     LivePocket はデータセンターからの素の HTTP 取得に AWS WAF の認証ページを
     返すが、ticketsite 側で認証ページを受け取ったときだけ実ブラウザで開き直し、
@@ -1812,13 +1819,15 @@ def run_livepocket() -> int:
     idols = build_idol_name_list()
     lineup_idx = lineup.build_index(idols)
     pre = [c for c in cards if c["status"] == "販売前"]
-    # 一覧の出演者欄で登録グループに当たるものだけを対象にする
+    on_sale = [c for c in cards if c["status"] == "販売中"]
+    # 一覧の出演者欄で登録グループに当たるものだけを対象にする。
+    # 取りに行く上限があるので、間に合わせたい販売前を先に並べる。
     targets = []
-    for c in pre:
+    for c in pre + on_sale:
         text = f"{c['name']}\n{' / '.join(c['performers'])}"
         if lineup.names_in_text(text, lineup_idx):
             targets.append(c)
-    print(f"LivePocket 新着一覧: {len(cards)} 件 / 販売前 {len(pre)} 件 / "
+    print(f"LivePocket 新着一覧: {len(cards)} 件 / 販売前 {len(pre)} 件・販売中 {len(on_sale)} 件 / "
           f"登録グループが出る {len(targets)} 件")
     total = 0
     touched = set()
@@ -2545,6 +2554,23 @@ def main() -> int:
     # DISCOVERY_ONLY=true はチケットサイト発見だけを回す軽量モード(数分)。
     # 重いサイト巡回(Groqのレート順守で約30分)を挟まずに済むので、高頻度で実行できる。
     discovery_only = os.environ.get("DISCOVERY_ONLY", "").lower() == "true"
+    # QUICK_LISTING=true は、ライポケ・TiGET の新着一覧だけを読むいちばん軽いモード
+    # (1時間ごと)。ライポケは公開から発売までが短く、1日1回のフル巡回だけで
+    # 一覧を読んでいたときは、ライポケの公演の56%を発売が始まってから見つけていた
+    # (2026-10-27 実測)。同じイベントページはその日のうちは読み直さない
+    # (_ingest_sale_url のキャッシュ)ので、回数を増やしても相手サイトへの取得は
+    # 一覧の数ページぶんしか増えない。
+    if os.environ.get("QUICK_LISTING", "").lower() == "true":
+        run_livepocket()
+        run_tiget()
+        # 新しく入った行と、同じ販売ページを指す既存の行の発売情報をそろえる
+        # (ネットに取りに行かない)
+        try:
+            share_sale_info(sb.get_ticket_page_rows(
+                datetime.datetime.now(JST).strftime("%Y-%m-%d")))
+        except Exception as e:
+            print(f"  発売情報をそろえられませんでした: {e}")
+        return 0
     if discovery_only:
         run_yahoo_rt(discover_sites=False)
         refresh_sale_info()
