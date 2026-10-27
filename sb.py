@@ -1,5 +1,9 @@
 def get_ticket_page_rows(today: str, prefix: str = None):
-    """今後の行の {tweet_id, ticket_url, sale_datetime} を返す(ticket_url がある行だけ)。
+    """今後の行の {tweet_id, ticket_url, sale_datetime, is_first_come, ticket_types}
+    を返す(ticket_url がある行だけ)。
+
+    先着かどうかと券種も返すのは、同じ販売ページを指す行どうしで発売情報を
+    写すとき(worker.share_sale_info)に、写す元の値として使うため。
 
     prefix を渡すとその取り込み元に絞る(例: "yrt:")。
     TimeTree のノートや Googleカレンダーから拾ったリンクには発売日時・券種・
@@ -8,7 +12,7 @@ def get_ticket_page_rows(today: str, prefix: str = None):
     URLは471件で、Yahoo!リアルタイム検索から入ったものは48件だけだった。
     """
     params = {
-        "select": "tweet_id,ticket_url,sale_datetime",
+        "select": "tweet_id,ticket_url,sale_datetime,is_first_come,ticket_types",
         "hidden": "eq.false",
         "ticket_url": "not.is.null",
         "event_datetime": f"gte.{today}",
