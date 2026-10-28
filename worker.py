@@ -2174,6 +2174,49 @@ def _release_slug(card: dict, detail: Optional[dict], lineup_idx):
     return names[0][1] if names and isinstance(names[0], (list, tuple)) else None
 
 
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _real_release_name(name: Optional[str]) -> bool:
+    """公演名として使える名前か。一覧の注意書き(「・」始まり)や空の名前を外す。"""
+    n = (name or "").strip()
+    return len(n) >= 2 and not n.startswith(("・", "※", "＊", "*"))
+
+
+def _release_place(name: Optional[str], store: Optional[str]) -> Optional[str]:
+    """会場。公演名に別の場所が書かれていればそちらを採る。
+
+    タワーレコードの一覧は、ほかの場所で開く催しも近くの店の欄に載せる
+    (「…全国行脚＠アミュプラザ長崎（長崎）」が博多店の欄にある)。
+    店の名前を含む書き方(「@タワーレコードアミュプラザ博多店」)はその店のまま。
+    """
+    # 名前の末尾の「＠場所（県）」だけを見る。「@JAM EXPO 出演記念」のような名前の一部は場所ではない
+    m = re.search(r"[@＠]\s*([^@＠()（）【】「」『』]{2,30}?)\s*(?:[（(][^)）]{1,10}[)）])?\s*$", name or "")
+    if not m or not store or m.start() == 0:
+        return store
+    place = m.group(1).strip()
+    if re.match(r"(?i)jam\b", place):
+        return store  # 「@JAM」はイベント名
+    norm = lambda x: re.sub(r"[\s・]", "", x)
+    if norm(store) in norm(place) or norm(place) in norm(store):
+        return store
+    return place
+
+
+def _drop_broken_release_rows():
+    """以前の取り込みで入った、日付が「開催日未定」の行や注意書きの行を消す。"""
+    try:
+        old = sb.get_auto_event_rows_by_prefix("rel:")
+    except Exception as e:
+        print(f"  リリイベの既存行を読めません: {e}")
+        return
+    bad = [r["tweet_id"] for r in old
+           if not re.search(r":\d{8}", r["tweet_id"]) or not _real_release_name(r.get("event_name"))]
+    if bad:
+        sb.delete_auto_events(bad)
+        print(f"  日付や名前が読めていなかったリリイベの行を {len(bad)} 件消しました")
+
+
 def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict]) -> dict:
     """リリイベ1件を auto_events の行にする。
 
@@ -2222,7 +2265,7 @@ def _release_row(card: dict, detail: Optional[dict], slug, ticket: Optional[dict
         "ticket_url": ticket_url,
         "ticket_types": (ticket or {}).get("ticket_types") or [],
         "max_tickets": None,
-        "other_details": clean_venue(card.get("store") or d.get("place")),
+        "other_details": clean_venue(_release_place(card.get("name"), card.get("store") or d.get("place"))),
         "raw_text": json.dumps(note, ensure_ascii=False),
         "tweet_url": card["url"],
     }
@@ -2300,9 +2343,13 @@ def run_release() -> int:
                 sb.set_last_seen(_rel_key(url), today)
             except Exception:
                 pass
-        date = card.get("date") or (detail or {}).get("date")
+        # 一覧の日付欄が「開催日未定」のこともあるので、日付の形のものだけを採る
+        date = next((d for d in (card.get("date"), (detail or {}).get("date"))
+                     if d and _ISO_DATE.match(d)), None)
         if not date or date < today:
             continue  # 終了済み、または日付が読めないものは入れない
+        if not _real_release_name(card.get("name")):
+            continue  # 一覧の注意書きの行(「・イベント券を紛失/盗難…」)を公演と読んだもの
         card["date"] = date
         # 事前に整理番号や参加券を売るページがあれば、受付開始を読む
         ticket = None
@@ -2323,6 +2370,7 @@ def run_release() -> int:
 
     # 念のため、同じ tweet_id が2つ以上あれば落とす
     # (PostgREST は同じキーを含む一括 upsert を 500 で返す)
+    _drop_broken_release_rows()
     uniq = {r["tweet_id"]: r for r in rows}
     if len(uniq) != len(rows):
         print(f"  同じキーの行を {len(rows) - len(uniq)} 件まとめました")
