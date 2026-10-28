@@ -171,6 +171,39 @@ def _clean_urls(rows):
         for key in ("ticket_url", "tweet_url"):
             if r.get(key):
                 r[key] = clean_url(r[key])
+        # TimeTree のノート等で途中が「…」に省略されたURLは開けないので持たない
+        if r.get("ticket_url") and "…" in r["ticket_url"]:
+            r["ticket_url"] = None
+    return rows
+
+
+def _fix_sale_years(rows):
+    """受付日時が公演日より後の行を直す。
+
+    年の書かれていない受付日(「8/23 23:59」)は取り込み元によって翌年に補完され、
+    公演(11/23)の9か月後に受付が始まる行ができていた(アプリで「あと299日」)。
+    1年戻して公演より前になるならそれを採り、ならなければ受付日時を外す。
+    """
+    import datetime
+    for r in rows:
+        sale, ev = r.get("sale_datetime"), r.get("event_datetime")
+        if not sale or not ev or not re.match(r"\d{4}-\d{2}-\d{2}", ev):
+            continue
+        try:
+            sd = datetime.datetime.fromisoformat(sale.replace("Z", "+00:00"))
+            ed = datetime.date.fromisoformat(ev[:10])
+        except ValueError:
+            continue
+        if sd.date() <= ed:
+            continue
+        try:
+            shifted = sd.replace(year=sd.year - 1)
+        except ValueError:  # 2/29
+            shifted = None
+        if shifted and (sd.date() - ed).days > 60 and shifted.date() <= ed:
+            r["sale_datetime"] = shifted.isoformat()
+        else:
+            r["sale_datetime"] = None
     return rows
 
 
@@ -196,7 +229,7 @@ def patch_auto_event(tweet_id: str, patch: dict):
 
 def upsert_auto_event(row: dict):
     """tweet_id をキーに auto_events を upsert(重複投稿は上書き)。"""
-    _drop_missing_columns(_clean_urls([row]))
+    _drop_missing_columns(_fix_sale_years(_clean_urls([row])))
     _request(
         "POST",
         "auto_events",
@@ -209,7 +242,7 @@ def upsert_auto_event(row: dict):
 def upsert_auto_events(rows):
     """auto_events を一括 upsert。1行ずつ POST すると件数分のHTTP往復になる
     (フェス1本で150グループ分の行が立つため、ここが実行時間を食っていた)。"""
-    rows = _drop_missing_columns(_clean_urls([r for r in rows if r]))
+    rows = _drop_missing_columns(_fix_sale_years(_clean_urls([r for r in rows if r])))
     if not rows:
         return
     for i in range(0, len(rows), 200):
