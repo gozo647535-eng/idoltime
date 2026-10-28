@@ -2191,7 +2191,7 @@ def _release_place(name: Optional[str], store: Optional[str]) -> Optional[str]:
     店の名前を含む書き方(「@タワーレコードアミュプラザ博多店」)はその店のまま。
     """
     # 名前の末尾の「＠場所（県）」だけを見る。「@JAM EXPO 出演記念」のような名前の一部は場所ではない
-    m = re.search(r"[@＠]\s*([^@＠()（）【】「」『』]{2,30}?)\s*(?:[（(][^)）]{1,10}[)）])?\s*$", name or "")
+    m = re.search(r"[@＠]\s*([^@＠()（）【】「」『』]{2,30}?)\s*(?:[（(][^)）]{1,10}[)）])?\s*(?:【[^】]{1,12}】\s*)*$", name or "")
     if not m or not store or m.start() == 0:
         return store
     place = m.group(1).strip()
