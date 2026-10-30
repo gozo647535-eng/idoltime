@@ -1,1 +1,433 @@
-[]
+[
+ {
+  "idol_slug": "artist:(仮)期間限定",
+  "event_name": "LIVE-ATTACK!! in 榴岡野音",
+  "event_datetime": "2026-11-01 10:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "open_time": "10:15",
+  "ticket_url": "https://t-dv.com/la1101",
+  "note": "出演: (仮)期間限定 / POEM / 仙台flavor / Shoutnoir / ゆめいろ流星群 / Zunda_Dolce / なるみらい / Tan.San.Sui. / めんこいな東北"
+ },
+ {
+  "idol_slug": "artist:仙台flavor",
+  "event_name": "LIVE-ATTACK!! in 榴岡野音",
+  "event_datetime": "2026-11-01 10:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "open_time": "10:15",
+  "ticket_url": "https://t-dv.com/la1101",
+  "note": "出演: (仮)期間限定 / POEM / 仙台flavor / Shoutnoir / ゆめいろ流星群 / Zunda_Dolce / なるみらい / Tan.San.Sui. / めんこいな東北"
+ },
+ {
+  "idol_slug": "artist:Shoutnoir",
+  "event_name": "LIVE-ATTACK!! in 榴岡野音",
+  "event_datetime": "2026-11-01 10:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "open_time": "10:15",
+  "ticket_url": "https://t-dv.com/la1101",
+  "note": "出演: (仮)期間限定 / POEM / 仙台flavor / Shoutnoir / ゆめいろ流星群 / Zunda_Dolce / なるみらい / Tan.San.Sui. / めんこいな東北"
+ },
+ {
+  "idol_slug": "artist:ゆめいろ流星群",
+  "event_name": "LIVE-ATTACK!! in 榴岡野音",
+  "event_datetime": "2026-11-01 10:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "open_time": "10:15",
+  "ticket_url": "https://t-dv.com/la1101",
+  "note": "出演: (仮)期間限定 / POEM / 仙台flavor / Shoutnoir / ゆめいろ流星群 / Zunda_Dolce / なるみらい / Tan.San.Sui. / めんこいな東北"
+ },
+ {
+  "idol_slug": "artist:Zunda_Dolce",
+  "event_name": "LIVE-ATTACK!! in 榴岡野音",
+  "event_datetime": "2026-11-01 10:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "open_time": "10:15",
+  "ticket_url": "https://t-dv.com/la1101",
+  "note": "出演: (仮)期間限定 / POEM / 仙台flavor / Shoutnoir / ゆめいろ流星群 / Zunda_Dolce / なるみらい / Tan.San.Sui. / めんこいな東北"
+ },
+ {
+  "idol_slug": "artist:なるみらい",
+  "event_name": "LIVE-ATTACK!! in 榴岡野音",
+  "event_datetime": "2026-11-01 10:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "open_time": "10:15",
+  "ticket_url": "https://t-dv.com/la1101",
+  "note": "出演: (仮)期間限定 / POEM / 仙台flavor / Shoutnoir / ゆめいろ流星群 / Zunda_Dolce / なるみらい / Tan.San.Sui. / めんこいな東北"
+ },
+ {
+  "idol_slug": "artist:Tan.San.Sui.",
+  "event_name": "LIVE-ATTACK!! in 榴岡野音",
+  "event_datetime": "2026-11-01 10:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "open_time": "10:15",
+  "ticket_url": "https://t-dv.com/la1101",
+  "note": "出演: (仮)期間限定 / POEM / 仙台flavor / Shoutnoir / ゆめいろ流星群 / Zunda_Dolce / なるみらい / Tan.San.Sui. / めんこいな東北"
+ },
+ {
+  "idol_slug": "artist:ギミラブ！",
+  "event_name": "ギミラブ！メイドカフェ",
+  "event_datetime": "2026-11-04 18:45",
+  "venue": "仙台NeoBrotherz",
+  "source_url": "https://x.com/givemelove_t",
+  "note": "19:30・20:30 に一部メンバーのステージあり"
+ },
+ {
+  "idol_slug": "artist:ギミラブ！",
+  "event_name": "〜COOL 対 CUTE IDOL祭〜",
+  "event_datetime": "2026-11-08 12:00",
+  "venue": "live studio ripple(長町リプル)",
+  "open_time": "11:30",
+  "ticket_url": "https://tiget.net/events/534204",
+  "note": "出演: ギミラブ！ / POEM / Able-Gleam"
+ },
+ {
+  "idol_slug": "artist:ギミラブ！",
+  "event_name": "ギミラブ！齋藤きらら卒業LIVE",
+  "event_datetime": "2026-11-08 19:30",
+  "venue": "live studio ripple(長町リプル)",
+  "open_time": "19:00",
+  "ticket_url": "https://tiget.net/events/528544"
+ },
+ {
+  "idol_slug": "artist:ギミラブ！",
+  "event_name": "夢野未来生誕祭2026 〜騒げ!歌え!CHAOSに！〜",
+  "event_datetime": "2026-11-23 18:00",
+  "venue": "仙台space zero",
+  "open_time": "17:30",
+  "source_url": "https://x.com/givemelove_t",
+  "note": "出演: 夢野未来 / ギミラブ！ Guest: 凛々しくも臨界に咲くARTERIA / 青春フィルム ほか"
+ },
+ {
+  "idol_slug": "artist:ギミラブ！",
+  "event_name": "めんこいな東北 2ndワンマンライブ『めんこいL♡VE』",
+  "event_datetime": "2026-11-28 13:30",
+  "venue": "仙台MACANA",
+  "ticket_url": "https://ticketdive.com/event/MKN1128",
+  "note": "出演: めんこいな東北 / けっぱって東北 / ギミラブ！"
+ },
+ {
+  "idol_slug": "artist:ギミラブ！",
+  "event_name": "仙台コンカフェフェス2026",
+  "event_datetime": "2026-11-29 14:20",
+  "venue": "元鍛冶丁公園(仙台市青葉区国分町)",
+  "note": "観覧無料。ギミラブ！は 14:20〜14:50"
+ },
+ {
+  "idol_slug": "artist:(仮)期間限定",
+  "event_name": "(仮)期間限定 × みちのく仙台ORI☆姫隊 野外無銭2MAN-LIVE!!",
+  "event_datetime": "2026-10-31 11:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "ticket_url": "https://ticketdive.com/event/kg_mso1031"
+ },
+ {
+  "idol_slug": "artist:(仮)期間限定",
+  "event_name": "(仮)期間限定 月1平日無銭定期公演(修行)",
+  "event_datetime": "2026-11-06",
+  "venue": "仙台駅前イービーンズ4F Culture blizzard",
+  "source_url": "https://x.com/KIKAN_GENTEI_S"
+ },
+ {
+  "idol_slug": "artist:(仮)期間限定",
+  "event_name": "夢幻∞VERSEDAY 2.0 -まゆたろう生誕祭-",
+  "event_datetime": "2026-11-08 13:00",
+  "venue": "仙台Neo Brotherz",
+  "open_time": "12:30",
+  "ticket_url": "https://tiget.net/events/532538"
+ },
+ {
+  "idol_slug": "artist:(仮)期間限定",
+  "event_name": "buzz R studio Presents アイドリズム!! Vol.32",
+  "event_datetime": "2026-11-15 10:50",
+  "venue": "buzz R studio",
+  "open_time": "10:30",
+  "ticket_url": "https://tiget.net/events/534423",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:Attimo",
+  "event_name": "buzz R studio Presents アイドリズム!! Vol.32",
+  "event_datetime": "2026-11-15 10:50",
+  "venue": "buzz R studio",
+  "open_time": "10:30",
+  "ticket_url": "https://tiget.net/events/534423",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:LUVYA SENDAI",
+  "event_name": "buzz R studio Presents アイドリズム!! Vol.32",
+  "event_datetime": "2026-11-15 10:50",
+  "venue": "buzz R studio",
+  "open_time": "10:30",
+  "ticket_url": "https://tiget.net/events/534423",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:stelLab.",
+  "event_name": "buzz R studio Presents アイドリズム!! Vol.32",
+  "event_datetime": "2026-11-15 10:50",
+  "venue": "buzz R studio",
+  "open_time": "10:30",
+  "ticket_url": "https://tiget.net/events/534423",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:MPF☆B",
+  "event_name": "buzz R studio Presents アイドリズム!! Vol.32",
+  "event_datetime": "2026-11-15 10:50",
+  "venue": "buzz R studio",
+  "open_time": "10:30",
+  "ticket_url": "https://tiget.net/events/534423",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:(仮)期間限定",
+  "event_name": "Yua＆いと Birthday Live",
+  "event_datetime": "2026-11-15 15:20",
+  "venue": "buzz R studio",
+  "open_time": "15:00",
+  "ticket_url": "https://tiget.net/events/534424",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / だいあくまめいろ / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:Attimo",
+  "event_name": "Yua＆いと Birthday Live",
+  "event_datetime": "2026-11-15 15:20",
+  "venue": "buzz R studio",
+  "open_time": "15:00",
+  "ticket_url": "https://tiget.net/events/534424",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / だいあくまめいろ / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:LUVYA SENDAI",
+  "event_name": "Yua＆いと Birthday Live",
+  "event_datetime": "2026-11-15 15:20",
+  "venue": "buzz R studio",
+  "open_time": "15:00",
+  "ticket_url": "https://tiget.net/events/534424",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / だいあくまめいろ / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:stelLab.",
+  "event_name": "Yua＆いと Birthday Live",
+  "event_datetime": "2026-11-15 15:20",
+  "venue": "buzz R studio",
+  "open_time": "15:00",
+  "ticket_url": "https://tiget.net/events/534424",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / だいあくまめいろ / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:MPF☆B",
+  "event_name": "Yua＆いと Birthday Live",
+  "event_datetime": "2026-11-15 15:20",
+  "venue": "buzz R studio",
+  "open_time": "15:00",
+  "ticket_url": "https://tiget.net/events/534424",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / だいあくまめいろ / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:だいあくまめいろ",
+  "event_name": "Yua＆いと Birthday Live",
+  "event_datetime": "2026-11-15 15:20",
+  "venue": "buzz R studio",
+  "open_time": "15:00",
+  "ticket_url": "https://tiget.net/events/534424",
+  "note": "出演: MPF☆B / ミニぼん / POEM / POPO project / だいあくまめいろ / (仮)期間限定 / Attimo / LUVYA SENDAI / stelLab."
+ },
+ {
+  "idol_slug": "artist:(仮)期間限定",
+  "event_name": "仙台コンカフェフェス2026",
+  "event_datetime": "2026-11-29",
+  "venue": "元鍛冶丁公園(仙台市青葉区国分町)",
+  "note": "観覧無料。ゲスト出演"
+ },
+ {
+  "idol_slug": "artist:LUVYA SENDAI",
+  "event_name": "LUVYA SENDAI Presents エンタメSHOW!! Vol.5 ～ラブヤ！ハロウィンパーティー!！～",
+  "event_datetime": "2026-11-01 14:50",
+  "venue": "IDOL STAGE LUVYA 仙台",
+  "open_time": "14:30",
+  "source_url": "https://x.com/stelLab2026",
+  "note": "2部 ハロウィンライブ。出演: LUVYA SENDAI / Attimo / stelLab.。前売2,000円 / 当日2,500円(+1D)"
+ },
+ {
+  "idol_slug": "artist:Attimo",
+  "event_name": "LUVYA SENDAI Presents エンタメSHOW!! Vol.5 ～ラブヤ！ハロウィンパーティー!！～",
+  "event_datetime": "2026-11-01 14:50",
+  "venue": "IDOL STAGE LUVYA 仙台",
+  "open_time": "14:30",
+  "source_url": "https://x.com/stelLab2026",
+  "note": "2部 ハロウィンライブ。出演: LUVYA SENDAI / Attimo / stelLab.。前売2,000円 / 当日2,500円(+1D)"
+ },
+ {
+  "idol_slug": "artist:stelLab.",
+  "event_name": "LUVYA SENDAI Presents エンタメSHOW!! Vol.5 ～ラブヤ！ハロウィンパーティー!！～",
+  "event_datetime": "2026-11-01 14:50",
+  "venue": "IDOL STAGE LUVYA 仙台",
+  "open_time": "14:30",
+  "source_url": "https://x.com/stelLab2026",
+  "note": "2部 ハロウィンライブ。出演: LUVYA SENDAI / Attimo / stelLab.。前売2,000円 / 当日2,500円(+1D)"
+ },
+ {
+  "idol_slug": "artist:みちのく仙台ORI☆姫隊",
+  "event_name": "(仮)期間限定 × みちのく仙台ORI☆姫隊 野外無銭2MAN-LIVE!!",
+  "event_datetime": "2026-10-31 11:30",
+  "venue": "仙台榴岡公園 野外音楽堂",
+  "ticket_url": "https://ticketdive.com/event/kg_mso1031"
+ },
+ {
+  "idol_slug": "artist:みちのく仙台ORI☆姫隊",
+  "event_name": "小倉神社奉納演芸大会",
+  "event_datetime": "2026-11-03 17:40",
+  "venue": "小倉神社",
+  "source_url": "https://orihimetai.com/event"
+ },
+ {
+  "idol_slug": "artist:みちのく仙台ORI☆姫隊",
+  "event_name": "富岡秋まつり2026",
+  "event_datetime": "2026-11-07 10:30",
+  "venue": "富岡町文化交流センター「学びの森」",
+  "source_url": "https://orihimetai.com/event"
+ },
+ {
+  "idol_slug": "artist:仙台flavor",
+  "event_name": "仙台flavor定期ライブ",
+  "event_datetime": "2026-11-06 19:00",
+  "venue": "仙台flavor専用ホール(ドン・キホーテ晩翠通り店3階)",
+  "source_url": "https://r.goope.jp/flashstudio/",
+  "note": "毎週金曜19:00〜の定期ライブ"
+ },
+ {
+  "idol_slug": "artist:仙台flavor",
+  "event_name": "仙台flavor定期ライブ",
+  "event_datetime": "2026-11-13 19:00",
+  "venue": "仙台flavor専用ホール(ドン・キホーテ晩翠通り店3階)",
+  "source_url": "https://r.goope.jp/flashstudio/",
+  "note": "毎週金曜19:00〜の定期ライブ"
+ },
+ {
+  "idol_slug": "artist:仙台flavor",
+  "event_name": "仙台flavor定期ライブ",
+  "event_datetime": "2026-11-20 19:00",
+  "venue": "仙台flavor専用ホール(ドン・キホーテ晩翠通り店3階)",
+  "source_url": "https://r.goope.jp/flashstudio/",
+  "note": "毎週金曜19:00〜の定期ライブ"
+ },
+ {
+  "idol_slug": "artist:仙台flavor",
+  "event_name": "仙台flavor定期ライブ",
+  "event_datetime": "2026-11-27 19:00",
+  "venue": "仙台flavor専用ホール(ドン・キホーテ晩翠通り店3階)",
+  "source_url": "https://r.goope.jp/flashstudio/",
+  "note": "毎週金曜19:00〜の定期ライブ"
+ },
+ {
+  "idol_slug": "artist:ゆめいろ流星群",
+  "event_name": "アイドルパーティー in MBL 2026 11 22 〜Me-riseあいか生誕祭〜",
+  "event_datetime": "2026-11-22",
+  "venue": "郡山MBL",
+  "source_url": "https://lit.link/yumeiroryuseigun"
+ },
+ {
+  "idol_slug": "artist:Tan.San.Sui.",
+  "event_name": "Tan.San.Sui.主催ライブ Vol.5",
+  "event_datetime": "2026-12-20",
+  "source_url": "https://x.com/TanSanSui_tss_"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "NAMARA MAZARU #MAZARU -LOFT X 7th Anniversary-",
+  "event_datetime": "2026-10-30",
+  "ticket_url": "https://ticketdive.com/event/loftx_7th4",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "コバラヘル presents コバランド~ HALLOWEEN special ~",
+  "event_datetime": "2026-10-31",
+  "ticket_url": "https://livepocket.jp/e/251261031",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "ネクストカルチャーズ-ハッピーハロウィン編",
+  "event_datetime": "2026-10-31",
+  "ticket_url": "https://tiget.net/events/529152",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "REBELLION BASE MISSION:04",
+  "event_datetime": "2026-11-03",
+  "ticket_url": "https://tiget.net/events/530686",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "〜COOL 対 CUTE IDOL祭〜",
+  "event_datetime": "2026-11-08 12:00",
+  "ticket_url": "https://tiget.net/events/534204",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "ギミラブ！齋藤きらら卒業LIVE",
+  "event_datetime": "2026-11-08 19:30",
+  "ticket_url": "https://tiget.net/events/528544",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "れあ生誕 CATALYST",
+  "event_datetime": "2026-11-13 19:00",
+  "ticket_url": "https://tiget.net/events/533512",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "屋根裏 vol.63",
+  "event_datetime": "2026-11-15",
+  "ticket_url": "https://tiget.net/events/533432",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "センシティブ集会 2nd ANNIVERSARY",
+  "event_datetime": "2026-11-17",
+  "ticket_url": "https://tiget.net/events/523703",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "ベリシズムサムライバースデーぴーぽーーーーず‼3",
+  "event_datetime": "2026-11-23",
+  "ticket_url": "https://tiget.net/events/529265",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "ASHIGARU DANCE SP 2026",
+  "event_datetime": "2026-11-28",
+  "ticket_url": "https://livepocket.jp/e/a66bp",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "KEMONO FES in 仙台~ひめパンク仙台生誕~",
+  "event_datetime": "2026-12-13 13:30",
+  "ticket_url": "https://tiget.net/events/532196",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "ルピノア＆1st Alubm release tour FINAL",
+  "event_datetime": "2026-12-26 16:30",
+  "ticket_url": "https://tiget.net/events/533506",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ },
+ {
+  "idol_slug": "artist:Able-Gleam",
+  "event_name": "ZENKOBA",
+  "event_datetime": "2027-02-22 14:22",
+  "ticket_url": "https://tiget.net/events/521590",
+  "source_url": "https://timetreeapp.com/public_calendars/ablegleam_022"
+ }
+]
