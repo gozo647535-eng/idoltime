@@ -980,10 +980,26 @@ def _site_event_dedup_key(name, datetime_str):
 
 
 def merge_site_events(jsonld_events, gemini_events):
-    """JSON-LD(構造化データ・高精度)を優先し、Geminiが拾った未カバーの公演を追加する。"""
+    """JSON-LD(構造化データ・高精度)を優先し、Geminiが拾った未カバーの公演を追加する。
+
+    構造化データに同じ名前の公演があるのに、LLM がそれと違う日付で出したものは捨てる。
+    LLM は公演名と日付の対応を取り違えることがある(ばってん少女隊の 11/3
+    「MATSURI-10」in 東京が、11/1 の行としても入っていた)。同じ名前で本当に
+    複数日ある公演は、構造化データにも日ごとに並ぶ。
+    """
+    ld_days = {}
+    for ev in jsonld_events:
+        if getattr(ev, "event_name", None):
+            n, d = _site_event_dedup_key(ev.event_name, ev.event_datetime)
+            ld_days.setdefault(n, set()).add(d)
     merged = []
     seen = set()
-    for ev in list(jsonld_events) + list(gemini_events):
+    for ev in list(jsonld_events) + [
+        e for e in gemini_events
+        if not (getattr(e, "event_name", None)
+                and (k := _site_event_dedup_key(e.event_name, e.event_datetime))[0] in ld_days
+                and k[1] not in ld_days[k[0]])
+    ]:
         if not getattr(ev, "event_name", None):
             continue
         k = _site_event_dedup_key(ev.event_name, ev.event_datetime)

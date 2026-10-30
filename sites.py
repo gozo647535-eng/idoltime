@@ -1406,44 +1406,77 @@ def template_events(html: str, today: str) -> List["SiteEvent"]:
 
 # 予定一覧の種類タグのうち、会場に行く予定を表すもの(RADIO・TV・MAGAZINE・RELEASE などは除く)
 _SCHEDULE_LIVE_TAGS = {"LIVE", "EVENT", "TOUR", "FES", "FESTIVAL", "STAGE", "CONCERT",
-                       "ライブ", "イベント", "ツアー", "特典会", "舞台"}
+                       "ライブ", "イベント", "ツアー", "特典会", "舞台", "公演"}
+
+
+def _cls(el) -> str:
+    return " ".join(el.get("class") or []) + " " + (el.get("id") or "")
+
+
+_SCHEDULE_CONTEXT = re.compile(r"schedule|calendar", re.I)
+_TAG_CLASS = re.compile(r"(^|[\s_\-])(tags?|category|cgy|genre|label)([\s_\-]|$)", re.I)
+_DATE_CLASS = re.compile(r"date|time", re.I)
+_TITLE_CLASS = re.compile(r"title|text|name|ttl", re.I)
+_PLACE_CLASS = re.compile(r"location|place|venue", re.I)
+_YMD = re.compile(r"(20\d\d)\s*[./\-年]\s*(\d{1,2})\s*[./\-月]\s*(\d{1,2})")
 
 
 def schedule_list_events(html: str, today: str, page_url: str = "") -> List["SiteEvent"]:
     """予定一覧の決まった形から、LLM を使わずに今後の公演を取り出す。
 
-    ファンクラブのサイトでよく使われる作り(超ときめき♡宣伝部・ばってん少女隊・
-    いぎなり東北産など)は、予定が
-      li.contents-list-item > .schedule-tags .tag(LIVE/TOUR…) + time[datetime] + .title
-      + .location-tags .tag(会場)
-    の形で並んでいる。LLM はこの一覧から公演を落とすことがある(ばってん少女隊の
-    11/3「MATSURI-10」in 東京が、本文に入っていたのに2回続けて取れなかった)。
+    公式サイトの予定一覧は、1件ずつ「種類のタグ(LIVE/EVENT/MEDIA…)・日付・公演名
+    (・会場)」が並ぶ作りが多い。LLM はこの一覧から公演を落とすことがある
+    (ばってん少女隊の 11/3「MATSURI-10」in 東京、虹のコンキスタドールの 11/2
+    「にじいろプリンセスパーティー！」)。
+      ばってん少女隊など: li.contents-list-item > .schedule-tags .tag + time[datetime] + .title
+      虹のコンキスタドール: li.top-schedule__item > .top-schedule__tag + __date + __text
+    ニュース一覧も同じ形をしていて、日付は投稿日なので使えない。一覧かその親の
+    クラス名に schedule・calendar が付いているものだけを読む。
+    種類が LIVE・EVENT などのものだけを採る(RADIO・TV・MAGAZINE などは除く)。
     """
-    if not html or "contents-list-item" not in html:
+    if not html or not _SCHEDULE_CONTEXT.search(html):
         return []
     soup = BeautifulSoup(html, "html.parser")
     out, seen = [], set()
-    for li in soup.select("li.contents-list-item"):
-        tags = {t.get_text(strip=True).upper() for t in li.select(".schedule-tags .tag")}
+    for li in soup.find_all("li"):
+        if li.find("li"):
+            continue   # 一覧の入れ物
+        ctx = [li] + list(li.parents)[:4]
+        if not any(_SCHEDULE_CONTEXT.search(_cls(e)) for e in ctx) and not li.select('[class*="schedule"]'):
+            continue
+        tags = set()
+        for el in li.find_all(True):
+            if _TAG_CLASS.search(_cls(el)) and not el.find(True, class_=_TAG_CLASS):
+                for t in re.split(r"[/_・\s]+", el.get_text(" ", strip=True).upper()):
+                    if t:
+                        tags.add(t)
         if not tags & _SCHEDULE_LIVE_TAGS:
             continue
-        when = li.select_one("time[datetime]")
-        title = li.select_one(".title")
-        if not when or not title:
+        day = None
+        t = li.find("time", attrs={"datetime": True})
+        if t and re.match(r"\d{4}-\d{2}-\d{2}", t["datetime"]):
+            day = t["datetime"][:10]
+        else:
+            for el in li.find_all(True, class_=_DATE_CLASS):
+                m = _YMD.search(el.get_text(" ", strip=True))
+                if m:
+                    day = f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+                    break
+        title = next((el for el in li.find_all(True)
+                      if _TITLE_CLASS.search(_cls(el)) and not _TAG_CLASS.search(_cls(el))
+                      and not _DATE_CLASS.search(_cls(el))), None)
+        if not day or not title or day < today:
             continue
-        day = (when.get("datetime") or "")[:10]
         name = re.sub(r"\s+", " ", title.get_text(" ", strip=True))
-        if not re.match(r"\d{4}-\d{2}-\d{2}$", day) or day < today or not name:
-            continue
-        if _is_media_title(name) or (day, name) in seen:
+        if len(name) < 4 or _is_media_title(name) or (day, name) in seen:
             continue
         seen.add((day, name))
-        venue = li.select_one(".location-tags .tag")
-        link = li.select_one("a[href]")
+        place = next((el for el in li.find_all(True) if _PLACE_CLASS.search(_cls(el))), None)
+        link = li.find("a", href=True) or (li.parent.find_parent("a", href=True) if li.parent else None)
         out.append(SiteEvent(
             event_name=name,
             event_datetime=day,
-            venue=venue.get_text(strip=True) if venue else None,
+            venue=re.sub(r"\s+", " ", place.get_text(" ", strip=True)) or None if place else None,
             source_url=urljoin(page_url, link["href"]) if link and page_url else None,
         ))
     return out
