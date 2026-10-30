@@ -597,6 +597,59 @@ def _event_anchor_url(name: str, anchors) -> Optional[str]:
     return None
 
 
+_URL_DAY = re.compile(r"(20\d\d)[-/_]?(\d{1,2})[-/_](\d{1,2})(?!\d)")
+
+
+def _other_day(day: str, text: str, url: str) -> bool:
+    """リンクの文字か URL に、公演日と違う日付だけが書かれているか。"""
+    if not day:
+        return False
+    found = set()
+    m = _URL_DAY.search(urllib.parse.unquote(urllib.parse.urlparse(url).path))
+    if m:
+        try:
+            found.add(datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat())
+        except ValueError:
+            pass
+    if text:
+        found.update(sites._dates_of(text, datetime.date.fromisoformat(day) - datetime.timedelta(days=30)))
+    return bool(found) and day not in found
+
+
+def _common_run(a: str, b: str) -> int:
+    """2つの文字列に共通する、いちばん長い連続部分の長さ。"""
+    best = 0
+    for i in range(len(a)):
+        for j in range(i + best + 1, len(a) + 1):
+            if a[i:j] in b:
+                best = j - i
+            else:
+                break
+    return best
+
+
+def _dated_anchor_url(ev, dated) -> Optional[str]:
+    """同じ日付の予定の項目からのリンク(公演の詳細ページ)。
+
+    公演名が4文字以上重なる項目を採る。重ならなくても、その日の項目が1つだけなら採る
+    (リンク文字列が「詳細」だけ、抽出した公演名が略されている、などの場合)。
+    """
+    day = (normalize_event_datetime(getattr(ev, "event_datetime", None)) or "")[:10]
+    if not day or not dated:
+        return None
+    same = [(t, u, own) for d, t, u, own in dated if d == day]
+    if not same:
+        return None
+    key = _id_name(getattr(ev, "event_name", "") or "")
+    scored = sorted(((_common_run(key, _id_name(t)), u) for t, u, _own in same), reverse=True)
+    if key and scored[0][0] >= 4:
+        return scored[0][1]
+    # 名前が重ならないときは、日付がリンクそのものに書かれた項目(予定表の1件)が
+    # その日に1つだけのときに限る。まわりの文字から日付を拾ったリンクは別の公演のことがある
+    urls = {u for _t, u, own in same if own}
+    return next(iter(urls)) if len(urls) == 1 and len({u for _t, u, _o in same}) == 1 else None
+
+
 def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
     """公演の案内先URL。
 
@@ -616,8 +669,17 @@ def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
                 return src
         except Exception:
             pass
+    day = (normalize_event_datetime(getattr(ev, "event_datetime", None)) or "")[:10]
+    # リンクの文字や URL に別の日付が書かれていれば、それは別の公演のページ
+    # (FRUITS ZIPPER のツアーが、名前の重なる 11/1 の写真集イベントのページに、
+    #  POEM の 11/3 が、サイト側の誤りで 11/1 のページに案内されていた)
+    anchors = [(t, u) for t, u in (anchors or []) if not _other_day(day, t, u)]
     hit = _event_anchor_url(getattr(ev, "event_name", "") or "", anchors)
     if hit and hit.rstrip("/") != site_url.rstrip("/"):
+        return hit
+    dated = [x for x in (sites.DATED_ANCHORS.get(site_url) or []) if not _other_day(day, "", x[2])]
+    hit = _dated_anchor_url(ev, dated)
+    if hit:
         return hit
     tag = (getattr(ev, "source_page", None) or "").strip().upper()
     if tag:

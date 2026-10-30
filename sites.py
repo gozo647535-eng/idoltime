@@ -30,7 +30,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v27"  # 公演ページの出演者欄から共演グループへ反映するので再抽出
+PROMPT_VERSION = "v28"  # 公演ページを予定の項目の日付からも探すので再抽出
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -1512,6 +1512,83 @@ def page_anchors(html: str, base_url: str):
     return out
 
 
+_BLOCK_TAGS = {"li", "article", "tr", "dl", "section"}
+# 公演の案内ではないページ(写真・ブログ・作品・グッズ・プロフィールなど)
+_NOT_EVENT_PAGE = re.compile(
+    r"photo|gallery|blog|diary|discography|goods|shop|store|movie|video|profile|member|fanclub|"
+    r"/fc/|login|mypage|contact|privacy|faq", re.I)
+_MD_IN_TEXT = re.compile(r"(?<![\d/.])(\d{1,2})\s*[./月]\s*(\d{1,2})(?![\d/.])")
+# サイトごとの「日付付きのリンク」。fetch_site_content が作り、取り込み側が公演ページ探しに使う
+DATED_ANCHORS: dict = {}
+
+
+def _dates_of(text: str, today) -> List[str]:
+    """文字列中の日付(YYYY-MM-DD)。年が無ければ今日に近い年で補う。"""
+    import datetime as _dt
+    out = []
+    for m in _YMD.finditer(text):
+        try:
+            out.append(_dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))).isoformat())
+        except ValueError:
+            pass
+    if out:
+        return out
+    for m in _MD_IN_TEXT.finditer(text):
+        try:
+            d = _dt.date(today.year, int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            continue
+        if d < today and (today - d).days > YEARLESS_PAST_DAYS:
+            d = d.replace(year=today.year + 1)
+        out.append(d.isoformat())
+    return out
+
+
+def dated_anchors(html: str, base_url: str):
+    """予定の項目からのリンクを [(日付, 項目の文字列, URL)] で返す。
+
+    予定表は「日付・種類・公演名」がひとかたまりの項目になっていて、そこから公演ごとの
+    詳細ページへリンクしていることが多い。リンク文字列が「詳細」「MORE」だけだったり、
+    公演名の書き方が抽出結果と少し違ったりしても、同じ日付の項目なら同じ公演とわかる。
+    """
+    import datetime as _dt
+    today = _dt.date.fromisoformat(_today_jst())
+    soup = BeautifulSoup(html or "", "html.parser")
+    for tag in soup(["header", "footer", "nav", "script", "style"]):
+        tag.decompose()
+    base_host = urlparse(base_url).netloc
+    out, seen = [], set()
+    for a in soup.find_all("a", href=True):
+        full = urljoin(base_url, a["href"]).split("#", 1)[0]
+        if urlparse(full).netloc != base_host or _NOT_A_PAGE.search(urlparse(full).path):
+            continue
+        path = urlparse(full).path
+        if full.rstrip("/") == base_url.rstrip("/") or path.strip("/") == "" or _NOT_EVENT_PAGE.search(path):
+            continue
+        # リンクそのもの、無ければリンクを含む項目(li・article など)の文字列から日付を読む
+        block = a
+        text = re.sub(r"\s+", " ", a.get_text(" ", strip=True))
+        days = _dates_of(text, today)
+        own = bool(days)   # 日付がリンク自体に書かれている(=予定の項目そのもの)
+        if not days:
+            for parent in list(a.parents)[:4]:
+                if parent.name in _BLOCK_TAGS:
+                    block = parent
+                    break
+            if block is not a:
+                text = re.sub(r"\s+", " ", block.get_text(" ", strip=True))[:300]
+                days = _dates_of(text, today)
+        # 1つの項目に日付が並ぶ(期間・受付日など)ものは、どの日の公演か決められない
+        if len(set(days)) != 1:
+            continue
+        key = (days[0], full)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((days[0], text[:200], full, own))
+    return out
+
+
 def calendar_links(html: str):
     """HTML 中の TimeTree / Google カレンダーのURLを重複なく返す。"""
     out = []
@@ -1611,10 +1688,15 @@ def fetch_site_content(site_url: str):
                 cal_links.append(u2)
 
     anchors = []
+    dated = []
     for u, h in pages:
         for pair in page_anchors(h, u):
             if pair not in anchors:
                 anchors.append(pair)
+        for item in dated_anchors(h, u):
+            if item not in dated:
+                dated.append(item)
+    DATED_ANCHORS[site_url] = dated
     page_urls = page_tags
     if not texts and not jsonld_events:
         return None, "", [], cal_links, page_urls, anchors
