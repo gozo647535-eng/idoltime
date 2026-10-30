@@ -759,7 +759,8 @@ _DETAIL_TICKET_RE = re.compile(
     r"https?://(?:t-dv\.com/[A-Za-z0-9_\-]+|ticketdive\.com/event/[A-Za-z0-9_\-]+"
     r"|tiget\.net/events/\d+|(?:t\.)?livepocket\.jp/e/[A-Za-z0-9_\-]+"
     r"|eplus\.jp/(?:sf/detail/[0-9A-Za-z\-]+|[A-Za-z0-9_\-]+/?)(?=[\s)）]|$)"
-    r"|w\.pia\.jp/t/[A-Za-z0-9_\-]+/?|l-tike\.com/[A-Za-z0-9_\-/]+)", re.M)
+    r"|w\.pia\.jp/t/[A-Za-z0-9_\-]+/?|t\.pia\.jp/pia/event/event\.do\?eventCd=\d+"
+    r"|l-tike\.com/(?:order/\?gLcode=\d+|[A-Za-z0-9_\-/]+))", re.M)
 # 「開催場所」「会場」の欄(「【会場】」とも書く)。値は見出しの次の行に書かれることが多い
 _DETAIL_VENUE_RE = re.compile(
     r"(?:^|\n)\s*[【［\[]?\s*(?:開催場所|会場)\s*[】］\]]?\s*[:：]?\s*\n?\s*([^\n【［\[]{2,40})")
@@ -769,6 +770,13 @@ _DETAIL_LINEUP_RE = re.compile(
     r"(.{0,500}?)(?=\n\s*[【［\[※]|\Z)", re.S | re.I)
 # 「10:40open」のように時刻が先に来る書き方
 _OPEN_AFTER_RE = re.compile(r"(\d{1,2})[:：](\d{2})\s*(?:open|OPEN|開場)")
+# 年つきで書かれた発売の開始(「受付期間：2026年10月18日(日)10:00～」)。後ろに「まで」が続くものは締切
+_DETAIL_SALE_RE = re.compile(
+    r"(先着|一般発売|一般販売|受付期間|販売期間|発売日時|発売開始|先行受付|抽選受付|プレイガイド)"
+    r"[^\n]{0,24}\n?[^\d\n]{0,12}(20\d\d)\s*[年/.\-]\s*(\d{1,2})\s*[月/.\-]\s*(\d{1,2})日?"
+    r"[^\d\n]{0,6}(\d{1,2})[:：](\d{2})(?!\s*(?:まで|迄))")
+# 「開場日時 13:45」のように開場と時刻の間に語が入る書き方
+_OPEN_LOOSE_RE = re.compile(r"開場[^\d\n]{0,4}(\d{1,2})[:：](\d{2})")
 _detail_cache: dict = {}
 
 
@@ -791,6 +799,12 @@ def _detail_page_text(url: str) -> Optional[str]:
         text = re.sub(r"\n\s*\n+", "\n", main.get_text("\n"))
         # サイドバー(カテゴリー・アーカイブの一覧)より前だけを使う
         text = re.split(r"\n\s*(?:カテゴリー|アーカイブ|関連記事|最近の投稿)\s*\n", text)[0]
+        # 販売ページへのリンクは文字が「イープラス」「チケットぴあ」だけのことが多く、
+        # 本文に URL が出てこない(いぎなり東北産の生誕祭)。リンク先も本文の後ろに足す
+        hrefs = [a["href"].replace("&amp;", "&") for a in main.find_all("a", href=True)]
+        tickets = [h for h in hrefs if _DETAIL_TICKET_RE.search(h)]
+        if tickets:
+            text += "\n" + "\n".join(dict.fromkeys(tickets))
     _detail_cache[url] = text
     return text
 
@@ -836,9 +850,24 @@ def enrich_site_row_from_detail(row: dict, site_url: str) -> dict:
             row["ticket_url"] = t.group(0)
     if not row.get("open_time"):
         # 「10:40open 11:00start」は先に時刻が来る。開場の後ろの語から読むと開演(11:00)を拾う
-        o = _OPEN_AFTER_RE.search(text)
-        row["open_time"] = (f"{int(o.group(1)):02d}:{o.group(2)}" if o
-                            else timetree.extract_open_entry(text)[0])
+        o = _OPEN_AFTER_RE.search(text) or None
+        open_t = f"{int(o.group(1)):02d}:{o.group(2)}" if o else timetree.extract_open_entry(text)[0]
+        if not open_t:
+            o = _OPEN_LOOSE_RE.search(text)
+            open_t = f"{int(o.group(1)):02d}:{o.group(2)}" if o else None
+        row["open_time"] = open_t
+    if not row.get("sale_datetime"):
+        # 「一般発売(先着)受付 受付期間：2026年10月18日(日)10:00～」(締切だけのものは読まない)
+        sm = _DETAIL_SALE_RE.search(text)
+        if sm:
+            sale = f"{sm.group(2)}-{int(sm.group(3)):02d}-{int(sm.group(4)):02d} {int(sm.group(5)):02d}:{sm.group(6)}:00"
+            near = text[sm.start():sm.end() + 40]
+            first_come = ("先着" in near or "一般" in near) and "抽選" not in near
+        else:
+            sale, first_come = timetree._regex_note_ticket(text, datetime.date.fromisoformat(date))
+        if sale and sale[:10] <= date:
+            row["sale_datetime"] = to_timestamptz(sale)
+            row["is_first_come"] = bool(first_come)
     v = _DETAIL_VENUE_RE.search(text)
     # 一覧から取れた会場が地名だけ(「郡山」「仙台」)なら、詳細ページの会場名にする
     if v and len(row.get("other_details") or "") <= 4:
@@ -1255,12 +1284,89 @@ def _site_mentions_group(name: str, text: str) -> bool:
         r"[^0-9a-z\u3040-\u30ff\u4e00-\u9fff]", "", hay)
 
 
+# 1回の実行で公演ページを読み直す数と、同じ行を読み直すまでの日数
+DETAIL_REFRESH_LIMIT = int(os.environ.get("DETAIL_REFRESH_LIMIT") or 60)
+DETAIL_RECHECK_DAYS = int(os.environ.get("DETAIL_RECHECK_DAYS") or 3)
+_DETAIL_FIELDS = ("ticket_url", "open_time", "other_details", "sale_datetime", "is_first_come",
+                  "ticket_types", "event_name", "event_datetime")
+
+
+def refresh_site_details(only_slugs=None) -> int:
+    """取り込み済みの公式サイトの公演に、公演ページの中身(販売ページ・開場・会場・発売・出演者)を足す。
+
+    公演ページは LLM で公演を抜き出すときにしか読んでいなかったため、サイトの内容が
+    変わらない・LLM の枠が尽きている間は、販売ページの分かる公演でもアプリから
+    公式サイトのトップにしか案内できなかった(いぎなり東北産の安杜羽加生誕祭)。
+    LLM は使わない。公演の近いものから、DETAIL_RECHECK_DAYS 日おきに読み直す。
+    only_slugs を渡すと、そのグループの行を日数に関係なく全部読む(手動実行用)。
+    """
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    try:
+        site_of = {w["idol_slug"]: w["site_url"] for w in build_site_watch_list(include_skipped=True)}
+        rows = sb.get_site_rows_for_detail(today)
+        seen = {} if only_slugs else sb.get_last_seen_by_prefix("detail:")
+    except Exception as e:
+        print(f"公演ページの読み直し: 準備に失敗(見送ります): {e}")
+        return 0
+    before = (datetime.date.fromisoformat(today)
+              - datetime.timedelta(days=DETAIL_RECHECK_DAYS)).isoformat()
+
+    def is_detail(r) -> bool:
+        site = site_of.get(r["idol_slug"]) or ""
+        url = r.get("tweet_url") or ""
+        return (bool(site) and urllib.parse.urlparse(url).netloc == urllib.parse.urlparse(site).netloc
+                and url.rstrip("/") != site.rstrip("/"))
+
+    cand = [r for r in rows
+            if (not only_slugs or r["idol_slug"] in only_slugs) and is_detail(r)
+            and (seen.get(f"detail:{r['tweet_id']}") or "") < before]
+    if not only_slugs:
+        cand = cand[:DETAIL_REFRESH_LIMIT]
+    if not cand:
+        return 0
+    try:
+        lineup_idx = lineup.build_index(build_idol_name_list())
+    except Exception:
+        lineup_idx = []
+    updated = fanout = 0
+    touched = set()
+    for r in cand:
+        site = site_of[r["idol_slug"]]
+        old = dict(r)
+        try:
+            enrich_site_row_from_detail(r, site)
+            enrich_row_with_ticketdive(r)
+        except Exception as e:
+            print(f"  {r['event_name'][:30]}: 公演ページの読み直しに失敗: {e}")
+            continue
+        patch = {k: r.get(k) for k in _DETAIL_FIELDS if r.get(k) != old.get(k)}
+        if patch:
+            try:
+                sb.patch_auto_event(r["tweet_id"], patch)
+                updated += 1
+            except Exception as e:
+                print(f"  {r['event_name'][:30]}: 書き込み失敗: {e}")
+        if lineup_idx:
+            names = detail_lineup_text(r, site)
+            if names:
+                fanout += _fanout_lineup(dict(r, raw_text=names), lineup_idx, today, touched)
+    try:
+        sb.set_last_seen_many([(f"detail:{r['tweet_id']}", today) for r in cand])
+    except Exception as e:
+        print(f"  公演ページを読んだ日の記録に失敗: {e}")
+    print(f"公演ページの読み直し: {len(cand)} 件を読み、{updated} 件に販売ページ・開場などを補った"
+          + (f" / 出演者から {fanout} 件をほかのグループに反映" if fanout else ""))
+    return updated
+
+
 def run_sites() -> int:
     """公式サイトを巡回してイベント/チケット情報を取り込む(主軸)。
     JSON-LD(schema.org Event)を Gemini不要で抽出し、Gemini解析結果と統合する。"""
     # SITE_SLUGS を渡すと、そのグループだけを順番待ち(ローテーション)や
     # site_skip.json に関係なく巡回する。取れないサイトの原因を短時間で確かめる用。
     only = [s for s in os.environ.get("SITE_SLUGS", "").split(",") if s.strip()]
+    # 取り込み済みの公演の公演ページを先に読み直す(LLM を使わないので、枠が尽きていても進む)
+    refresh_site_details(set(only) if only else None)
     watch = build_site_watch_list(include_skipped=bool(only))
     if not watch:
         print("公式サイトの監視対象がありません(図鑑に公式サイトURLが未登録の可能性)。")
