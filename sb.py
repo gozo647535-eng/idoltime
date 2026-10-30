@@ -277,6 +277,32 @@ def get_auto_event_ids(idol_slug: str, prefix: str = "tt:"):
     return [r["tweet_id"] for r in (rows or [])]
 
 
+def get_site_rows_for_detail(today: str):
+    """今後の公式サイト由来の行のうち、販売ページか開場時刻が欠けているもの(公演ページを読み直す候補)。"""
+    out = []
+    for offset in range(0, 20000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": "tweet_id,idol_slug,event_name,event_datetime,open_time,other_details,"
+                          "ticket_url,sale_datetime,is_first_come,ticket_types,tweet_url",
+                "tweet_id": "like.site:*",
+                "hidden": "eq.false",
+                "event_datetime": f"gte.{today}",
+                "or": "(ticket_url.is.null,open_time.is.null)",
+                "order": "event_datetime.asc,tweet_id.asc",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+    return out
+
+
 def get_auto_event_ids_like(pattern: str):
     """tweet_id が pattern(PostgREST の like。* が任意の文字列)に合う行の tweet_id 一覧。"""
     _, rows = _request(
