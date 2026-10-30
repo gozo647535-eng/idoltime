@@ -32,7 +32,7 @@ JST = datetime.timezone(datetime.timedelta(hours=9))
 # メモ抽出ロジックを変えたらこの値を上げる(既読カレンダーの再処理をトリガー)
 # v3: TicketDive 構造化データによる補完を追加
 # v5: メモから開場/入場時刻(open_time/entry_time)を抽出
-EXTRACT_VERSION = "v6"  # 会場欄が空の予定はメモから会場名を拾うようにしたので再取り込み
+EXTRACT_VERSION = "v7"  # 発売の締切(「〜まで」)を開始と読んでいたのを直したので再取り込み
 
 # チケット関連のメモか判定するキーワード
 _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", "販売", "先着")
@@ -205,13 +205,27 @@ class NoteTicket(BaseModel):
     is_first_come: bool = Field(False, description="先着/一般発売(先着)なら True。抽選・先行(抽選)は False")
 
 
+_DEADLINE_AFTER = re.compile(r"^\s*[（(]?[^\d\n]{0,3}[)）]?\s*(?:\d{1,2}[:：]\d{2})?\s*(?:まで|迄|締め?切|〆)")
+
+
+def _is_deadline(note: str, m) -> bool:
+    """発売の一致が、開始ではなく締切(「〜11/16」「11/16 23:59まで」)を指しているか。"""
+    lead = note[m.start():m.start(1)]
+    if re.search(r"[〜～~]\s*$", lead):
+        return True
+    return bool(_DEADLINE_AFTER.match(note[m.end():m.end() + 12]))
+
+
 def _regex_note_ticket(note: str, today: datetime.date):
     """メモ本文から発売日時と先着判定を正規表現で抽出(無料・Gemini不要)。
     返り値 (sale_datetime_str|None 'YYYY-MM-DD HH:MM:SS', is_first_come_bool)。"""
     has_fc = ("先着" in note) or ("一般発売" in note) or ("一般販売" in note)
     has_lot = "抽選" in note  # 抽選が絡むなら先着扱いにしない
     is_fc = has_fc and not has_lot
-    m = _SALE_RE.search(note)
+    # 「一般発売：11/16(月)23:59まで発売中」「受付：〜11/16」は締切で、発売の開始ではない。
+    # 開始として読むと、発売済みの公演が締切の時刻に「これから発売」として並ぶ
+    # (マリークラウンの MARQUEE Fes. が先着の一覧に 11/16 23:59 発売で出ていた)
+    m = next((x for x in _SALE_RE.finditer(note) if not _is_deadline(note, x)), None)
     if not m:
         return None, is_fc
     mo, d, h, mi = m.groups()
@@ -289,7 +303,10 @@ def extract_note_ticket(gemini_client, title: str, note: str, today: str):
         return None, False
     today_date = datetime.date.fromisoformat(today)
     sale, is_fc = _regex_note_ticket(note, today_date)
-    if sale:  # 正規表現で取れたら Gemini は呼ばない(コスト節約・クォータ非依存)
+    # 正規表現で取れたら Gemini は呼ばない(コスト節約・クォータ非依存)。
+    # 日付はあったが締切だけ(「11/16 23:59まで発売中」)のときも呼ばない。
+    # LLM はその締切を開始日時として返してしまう
+    if sale or _SALE_RE.search(note):
         return sale, is_fc
     # 取れない時だけ Gemini にフォールバック
     g_sale, g_fc = _gemini_note_ticket(gemini_client, title, note, today)
