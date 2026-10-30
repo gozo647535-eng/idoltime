@@ -599,7 +599,7 @@ def _event_anchor_url(name: str, anchors) -> Optional[str]:
 
 # 一覧のページ(公演ごとのページではない)
 _LIST_PAGE = re.compile(r"/(?:schedules?|calendar|vertical_calendar|news|live|lives|events?|info|information|media|contents|list)/?$"
-                        r"|/(?:schedules?|calendar|vertical_calendar)/\d{4}", re.I)
+                        r"|/(?:schedules?|calendar|vertical_calendar)/20\d\d(?:/\d{1,2})?/?$", re.I)
 _URL_DAY = re.compile(r"(20\d\d)[-/_]?(\d{1,2})[-/_](\d{1,2})(?!\d)")
 
 
