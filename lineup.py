@@ -89,3 +89,49 @@ def names_in_text(text: str, idx) -> List[Tuple[str, str]]:
         taken.extend(sp)
         found.append((disp, slug))
     return found
+
+
+# 出演者欄を日ごとに分けて書く投稿(2日開催のフェス)の、日付だけの見出し行。
+# 「11/21」「【11/22(日)】」「2026/11/22(日)」「11月21日(土) 出演」など
+_DAY_HEAD = re.compile(
+    r"^\s*[【\[［(（<＜■◆●▼◇☆★]*\s*(?:20\d\d\s*[/.年-]\s*)?(\d{1,2})\s*[/月.]\s*(\d{1,2})\s*日?"
+    r"\s*(?:[(（][^)）]{1,6}[)）])?\s*[】\]］)）>＞]?\s*(?:出演(?:者)?)?\s*[:：]?\s*(.*)$"
+)
+# 見出しの後ろに続いてよいのは出演者の並びだけ。時刻や販売の案内が続く行は見出しではない
+_NOT_LINEUP = re.compile(r"\d{1,2}\s*[:：]\s*\d{2}|開場|開演|販売|発売|受付|締切|〆|抽選|発表|まで|~|〜|～")
+
+
+def day_sections(text: str, idx) -> List[Tuple[str, str]]:
+    """本文を日付の見出しで区切る [(\"MM-DD\" または \"\", その区切りの本文), ...]。
+
+    日付の見出しが2つ以上ある(日ごとに出演者を書き分けている)ときだけ区切る。
+    そうでなければ空を返す。見出しより前と、見出しの段落が空行で終わったあとは
+    \"\"(日付の指定なし)。「11/28 ライブ 18:50〜」のように日ごとの出演時刻を書いた
+    段落のあとに、両日の出演者をまとめて並べる投稿があるため、見出しの効き目は
+    その段落の中だけにする。
+    """
+    if not text:
+        return []
+    sections, cur, buf, heads = [], "", [], set()
+    for line in unicodedata.normalize("NFKC", text).split("\n"):
+        if not line.strip():
+            # 見出しの直後の空行は段落の終わりではない(「11/21」の次に1行空けて並べる書き方)
+            if cur and any(x.strip() for x in buf):
+                sections.append((cur, "\n".join(buf)))
+                cur, buf = "", []
+            buf.append(line)
+            continue
+        m = _DAY_HEAD.match(line)
+        rest = m.group(3).strip() if m else ""
+        is_head = bool(m) and 1 <= int(m.group(1)) <= 12 and 1 <= int(m.group(2)) <= 31 and (
+            not rest or (not _NOT_LINEUP.search(rest) and names_in_text(rest, idx))
+        )
+        if not is_head:
+            buf.append(line)
+            continue
+        sections.append((cur, "\n".join(buf)))
+        cur = f"{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+        heads.add(cur)
+        buf = [rest]
+    sections.append((cur, "\n".join(buf)))
+    return sections if len(heads) >= 2 else []

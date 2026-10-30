@@ -1689,26 +1689,104 @@ def _fanout_lineup(row: dict, lineup_idx, today: str, touched: set) -> int:
     if not date or date < today or not prefix:
         return 0
     text = f"{row.get('event_name') or ''}\n{row.get('raw_text') or ''}"
-    batch = []
+    other_days = _lineup_other_days(text, date, lineup_idx)
+    batch, stale = [], []
     for disp, other in lineup.names_in_text(text, lineup_idx):
         if other == row["idol_slug"]:
             continue
         if len(batch) >= MAX_LINEUP_FANOUT:
             print(f"    出演者の相互反映が{MAX_LINEUP_FANOUT}件を超えたため打ち切りました")
             break
+        base_id = f"ttx:{other}:{tid[len(prefix):]}"
+        days = other_days.get(other)
+        if days is not None:
+            # 出演者欄で別の日に書かれているグループは、その日の公演として反映する
+            # (2日開催のフェスで、11/21 の出演者が 11/22 の行に入っていた)
+            stale.append(f"{base_id}:{date.replace('-', '')}")
+            for d in days:
+                if d < today:
+                    continue
+                xr = dict(row, idol_slug=other, event_datetime=d, tweet_id=f"{base_id}:{d.replace('-', '')}")
+                # 開場・出演の時刻は行の日のものなので持ち込まない
+                for k in ("stage_time", "open_time", "entry_time"):
+                    xr.pop(k, None)
+                batch.append(xr)
+                touched.add(other)
+            continue
         xr = dict(row)
         xr["idol_slug"] = other
-        xr["tweet_id"] = f"ttx:{other}:{tid[len(prefix):]}:{date.replace('-', '')}"
+        xr["tweet_id"] = f"{base_id}:{date.replace('-', '')}"
         # 出演時刻は元のカレンダーの持ち主のものなので、反映先には持ち込まない
         xr.pop("stage_time", None)
         batch.append(xr)
         touched.add(other)
     try:
+        if stale:
+            sb.delete_auto_events(stale)
         sb.upsert_auto_events(batch)
     except Exception as e:
         print(f"    相互反映の書き込み失敗({len(batch)}件): {e}")
         return 0
     return len(batch)
+
+
+# 出演者欄の日付の見出しを、行の日付から何日までの範囲で同じ催しの別の日とみなすか
+LINEUP_DAY_RANGE = 10
+
+
+def _lineup_other_days(text: str, date: str, lineup_idx) -> dict:
+    """出演者欄を日ごとに書き分けた本文で、行の日付には出ないグループ → 出る日(YYYY-MM-DD)の一覧。
+
+    書き分けが無い本文、または行の日付の見出しが無い本文では空(従来どおり全員を行の日に反映)。
+    """
+    sections = lineup.day_sections(text, lineup_idx)
+    md = date[5:10]
+    if not sections or md not in {d for d, _ in sections}:
+        return {}
+    days = {}
+    for d, chunk in sections:
+        for _, slug in lineup.names_in_text(chunk, lineup_idx):
+            days.setdefault(slug, set()).add(d)
+    base = datetime.date.fromisoformat(date[:10])
+    out = {}
+    for slug, ds in days.items():
+        dated = ds - {""}
+        if not dated or md in dated:
+            continue
+        full = []
+        for d in sorted(dated):
+            mm, dd = int(d[:2]), int(d[3:])
+            # 年またぎ(12/31 と 1/1 の2日開催)もあるので、行の日付に一番近い年を選ぶ
+            near = []
+            for y in (base.year - 1, base.year, base.year + 1):
+                try:
+                    near.append(datetime.date(y, mm, dd))
+                except ValueError:
+                    pass
+            c = min(near, key=lambda x: abs((x - base).days), default=None)
+            if c and abs((c - base).days) <= LINEUP_DAY_RANGE:
+                full.append(c.isoformat())
+        if full:
+            out[slug] = full
+    return out
+
+
+def repair_lineup_days(lineup_idx, today: str) -> None:
+    """日ごとに出演者を書き分けた投稿から、別の日の出演者を行の日に反映していた分を直す(1回だけ)。
+
+    元の行は内容が変わらない限り読み直されないため、今ある今後の行を一度だけ反映し直す。
+    """
+    key = "repair:lineup-days:v1"
+    if sb.get_last_seen(key):
+        return
+    fixed = 0
+    for prefix in ("tt:", "gc:"):
+        for row in sb.get_future_text_rows(prefix, today):
+            text = f"{row.get('event_name') or ''}\n{row.get('raw_text') or ''}"
+            if _lineup_other_days(text, (row.get("event_datetime") or "")[:10], lineup_idx):
+                fixed += _fanout_lineup(row, lineup_idx, today, set())
+    sb.set_last_seen(key, today)
+    print(f"出演者欄の日付の書き分けを反映し直しました: {fixed} 件")
 
 
 def run_timetree() -> int:
@@ -1722,6 +1800,10 @@ def run_timetree() -> int:
     watch = _rotate(watch, today, "tq", TT_BATCH, "TimeTree")
     lineup_idx = lineup.build_index(build_idol_name_list())
     print(f"出演者の相互反映に使う登録グループ: {len(lineup_idx)} 件")
+    try:
+        repair_lineup_days(lineup_idx, today)
+    except Exception as e:
+        print(f"出演者欄の日付の書き分けの反映し直しに失敗(次回また試します): {e}")
     total = 0
     fanout = 0
     fanout_slugs = set()

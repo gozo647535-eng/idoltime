@@ -341,6 +341,36 @@ def get_auto_event_rows_by_prefix(prefix: str):
     return out
 
 
+# 取り込みが書く列(行を読み直して書き戻すときに、id などの自動の列を持ち込まないため)。
+# stage_time は反映先へ持ち込まない列なので読まない(列が無い環境もある)
+ROW_COLUMNS = ("tweet_id,idol_slug,account,event_name,event_datetime,open_time,entry_time,"
+               "sale_datetime,is_first_come,ticket_url,ticket_types,max_tickets,other_details,raw_text,tweet_url")
+
+
+def get_future_text_rows(prefix: str, today: str):
+    """tweet_id が prefix で始まる今後の行のうち、本文(raw_text)のあるものを書き戻せる形で全件返す。"""
+    out = []
+    for offset in range(0, 100000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": ROW_COLUMNS,
+                "tweet_id": f"like.{prefix}*",
+                "event_datetime": f"gte.{today}",
+                "raw_text": "not.is.null",
+                "order": "tweet_id",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+    return out
+
+
 def delete_auto_events(tweet_ids):
     """tweet_id を指定して auto_events を一括削除(件数分の往復を避ける)。"""
     ids = [t for t in tweet_ids if t]
