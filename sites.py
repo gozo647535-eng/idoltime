@@ -1404,6 +1404,51 @@ def template_events(html: str, today: str) -> List["SiteEvent"]:
     return out
 
 
+# 予定一覧の種類タグのうち、会場に行く予定を表すもの(RADIO・TV・MAGAZINE・RELEASE などは除く)
+_SCHEDULE_LIVE_TAGS = {"LIVE", "EVENT", "TOUR", "FES", "FESTIVAL", "STAGE", "CONCERT",
+                       "ライブ", "イベント", "ツアー", "特典会", "舞台"}
+
+
+def schedule_list_events(html: str, today: str, page_url: str = "") -> List["SiteEvent"]:
+    """予定一覧の決まった形から、LLM を使わずに今後の公演を取り出す。
+
+    ファンクラブのサイトでよく使われる作り(超ときめき♡宣伝部・ばってん少女隊・
+    いぎなり東北産など)は、予定が
+      li.contents-list-item > .schedule-tags .tag(LIVE/TOUR…) + time[datetime] + .title
+      + .location-tags .tag(会場)
+    の形で並んでいる。LLM はこの一覧から公演を落とすことがある(ばってん少女隊の
+    11/3「MATSURI-10」in 東京が、本文に入っていたのに2回続けて取れなかった)。
+    """
+    if not html or "contents-list-item" not in html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    out, seen = [], set()
+    for li in soup.select("li.contents-list-item"):
+        tags = {t.get_text(strip=True).upper() for t in li.select(".schedule-tags .tag")}
+        if not tags & _SCHEDULE_LIVE_TAGS:
+            continue
+        when = li.select_one("time[datetime]")
+        title = li.select_one(".title")
+        if not when or not title:
+            continue
+        day = (when.get("datetime") or "")[:10]
+        name = re.sub(r"\s+", " ", title.get_text(" ", strip=True))
+        if not re.match(r"\d{4}-\d{2}-\d{2}$", day) or day < today or not name:
+            continue
+        if _is_media_title(name) or (day, name) in seen:
+            continue
+        seen.add((day, name))
+        venue = li.select_one(".location-tags .tag")
+        link = li.select_one("a[href]")
+        out.append(SiteEvent(
+            event_name=name,
+            event_datetime=day,
+            venue=venue.get_text(strip=True) if venue else None,
+            source_url=urljoin(page_url, link["href"]) if link and page_url else None,
+        ))
+    return out
+
+
 # 公演ごとの詳細ページを探すためのリンク。イベント名に一致するリンク文字列が
 # あれば、そのURLを案内先にできる(サイトのトップに飛ばすより親切)。
 _ANCHOR_MIN_TEXT = 6
@@ -1514,7 +1559,8 @@ def fetch_site_content(site_url: str):
     seen_ld = set()
     today_ld = _today_jst()
     for u, h in pages:
-        for ev in list(_parse_jsonld_events(h)) + template_events(h, today_ld):
+        for ev in (list(_parse_jsonld_events(h)) + template_events(h, today_ld)
+                   + schedule_list_events(h, today_ld, u)):
             k = (ev.event_name, ev.event_datetime)
             if k not in seen_ld:
                 seen_ld.add(k)
