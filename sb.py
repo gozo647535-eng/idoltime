@@ -187,7 +187,19 @@ def _fix_sale_years(rows):
     import datetime
     for r in rows:
         sale, ev = r.get("sale_datetime"), r.get("event_datetime")
-        if not sale or not ev or not re.match(r"\d{4}-\d{2}-\d{2}", ev):
+        if not sale:
+            continue
+        # 発売の開始が 23:59 ということはまず無い。「11/16(月)23:59まで」の締切を
+        # 開始と読んだもので、発売済みの公演が「これから発売」として並んでしまう
+        try:
+            jst = datetime.datetime.fromisoformat(sale.replace("Z", "+00:00")).astimezone(
+                datetime.timezone(datetime.timedelta(hours=9)))
+            if (jst.hour, jst.minute) == (23, 59):
+                r["sale_datetime"] = None
+                continue
+        except ValueError:
+            pass
+        if not ev or not re.match(r"\d{4}-\d{2}-\d{2}", ev):
             continue
         try:
             sd = datetime.datetime.fromisoformat(sale.replace("Z", "+00:00"))
