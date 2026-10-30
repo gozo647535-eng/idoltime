@@ -1520,6 +1520,8 @@ _NOT_EVENT_PAGE = re.compile(
 _MD_IN_TEXT = re.compile(r"(?<![\d/.])(\d{1,2})\s*[./月]\s*(\d{1,2})(?![\d/.])")
 # サイトごとの「日付付きのリンク」。fetch_site_content が作り、取り込み側が公演ページ探しに使う
 DATED_ANCHORS: dict = {}
+# サイトごとの、読んだページの見出し [(見出し, URL)]
+PAGE_TITLES: dict = {}
 
 
 def _dates_of(text: str, today) -> List[str]:
@@ -1646,6 +1648,7 @@ def fetch_site_content(site_url: str):
             pages.append((nxt, h))
 
     texts = []
+    titles = []      # [(ページの見出し, URL)] 特設ページを公演名で引くため
     page_tags = []   # [(P番号, URL)] 本文に出した見出しと実URLの対応
     for u, h in pages:
         t = _html_to_text(h)
@@ -1662,6 +1665,8 @@ def fetch_site_content(site_url: str):
         # 公演名の突合(LLM不要)で解決できるので、プロンプトは元の形に戻す。
         title = _page_title(h)
         page_tags.append((f"P{len(texts) + 1}", u))
+        if title:
+            titles.append((title, u))
         texts.append(f"{PAGE_MARK}{title}\n{t}" if title else t)
 
     # JSON-LD(schema.org Event)を抽出。名前+日時で重複除去。
@@ -1697,6 +1702,8 @@ def fetch_site_content(site_url: str):
             if item not in dated:
                 dated.append(item)
     DATED_ANCHORS[site_url] = dated
+    # トップ以外のページの見出し(「初！いぎなりアリーナライブ 特設ページ」のような特設ページ)
+    PAGE_TITLES[site_url] = [(t, u) for t, u in titles if u.rstrip("/") != site_url.rstrip("/")]
     page_urls = page_tags
     if not texts and not jsonld_events:
         return None, "", [], cal_links, page_urls, anchors
