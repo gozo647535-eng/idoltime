@@ -900,7 +900,9 @@ def _condense_for_llm(text: str, limit: int = 2200) -> str:
     日付と公演名は別の行に分かれていることが多いので、前後1行をひとかたまりとして
     扱い、組にしたまま残す(日付だけが並んで名前が消えるのを防ぐ)。
     """
-    lines = text.split("\n")
+    # 描画したページは行頭にタブが残る(「\t\t\t2026.11.08」)。そのままだと日付だけの
+    # 行と分からず、日ごとのかたまりにならない(超ときめき♡宣伝部の11月が丸ごと落ちた)
+    lines = [ln.strip() for ln in text.split("\n")]
     page_marks = [i for i, ln in enumerate(lines) if ln.startswith(PAGE_MARK)]
     blocks = []
     for i, ln in enumerate(lines):
@@ -1303,6 +1305,44 @@ def _fetch_subpage(url: str):
     return h
 
 
+# 月ごとの予定表で、翌月・翌々月を読むページの数
+NEXT_MONTH_PAGES = 2
+
+
+def _next_month_pages(pages, base_url: str) -> List[str]:
+    """月ごとに分かれた予定表の、翌月・翌々月のページのURL。
+
+    予定表が「今月」しか出さない作りのサイトでは、月末になると今後の公演が
+    翌月のページにしか無い(超ときめき♡宣伝部の /calendar は今月だけで、
+    11月の公演は /vertical_calendar/2026/11 にあった)。読んだページのリンクから、
+    URL の終わり(またはクエリ)が翌月・翌々月の年月になっているものを探す。
+    「/2026-11-1」のような日ごとの記事は年月で終わらないので拾わない。
+    """
+    import datetime as _dt
+    today = _dt.date.fromisoformat(_today_jst())
+    months = []
+    y, m = today.year, today.month
+    for _ in range(NEXT_MONTH_PAGES):
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        months.append((y, m))
+    host = urlparse(base_url).netloc
+    have = {u.rstrip("/") for u, _h in pages}
+    out = []
+    for y, m in months:
+        pat = re.compile(rf"[/=_\-]{y}[/\-_]?0?{m}/?(?:$|[?&#])")
+        for _u, h in pages:
+            found = None
+            for href in re.findall(r"href=[\"']([^\"'#]+)", h or ""):
+                full = urljoin(_u, href.replace("&amp;", "&"))
+                if urlparse(full).netloc == host and pat.search(full):
+                    found = full
+                    break
+            if found and found.rstrip("/") not in have and found not in out:
+                out.append(found)
+                break
+    return out
+
+
 # 公式サイトに貼られている公開カレンダー。予定表をJSで描くサイトからLLMで
 # 読み取るより、カレンダーそのものを読むほうが確実で無料枠も使わない。
 _CALENDAR_LINK_RE = re.compile(
@@ -1443,6 +1483,13 @@ def fetch_site_content(site_url: str):
             if h:
                 pages.append((sub, h))
 
+    # 予定表が月ごとに分かれていれば、翌月・翌々月のページも読む
+    for nxt in _next_month_pages(pages, site_url):
+        h = _fetch_subpage(nxt)
+        if h:
+            print(f"    翌月以降の予定表も読みます: {nxt}")
+            pages.append((nxt, h))
+
     texts = []
     page_tags = []   # [(P番号, URL)] 本文に出した見出しと実URLの対応
     for u, h in pages:
@@ -1521,7 +1568,8 @@ def has_future_dates(text: str) -> bool:
         return False
     today = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))).date()
     limit = today + _dt.timedelta(days=365)
-    for m in re.finditer(r"(20\d\d)[/年.\-](\d{1,2})[/月.\-](\d{1,2})", text):
+    full = r"(20\d\d)[/年.\-](\d{1,2})[/月.\-](\d{1,2})"
+    for m in re.finditer(full, text):
         try:
             d = _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except ValueError:
@@ -1529,7 +1577,10 @@ def has_future_dates(text: str) -> bool:
         if today <= d <= limit:
             return True
     # 年を伴わない「11/14」「8月20日」「10.05」等。年跨ぎを考え今年と翌年で判定する。
-    for m in re.finditer(r"(?<!\d)(\d{1,2})[/月.](\d{1,2})日?(?!\d)", text):
+    # 年付きの日付は上で見たので外す。残すと「2026.10.05」の「10.05」を来年の
+    # 10/5 と読み、終わった日を今後の日付としてしまう(過ぎた日の予定が優先され、
+    # 翌月の公演が字数の枠から押し出されていた)。
+    for m in re.finditer(r"(?<!\d)(\d{1,2})[/月.](\d{1,2})日?(?!\d)", re.sub(full, " ", text)):
         for y in (today.year, today.year + 1):
             try:
                 d = _dt.date(y, int(m.group(1)), int(m.group(2)))
