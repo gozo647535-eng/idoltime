@@ -695,9 +695,16 @@ def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None,
 # 公演ごとの詳細ページに書かれているチケットの販売ページ(本文にURLだけが書かれていることも多い)
 _DETAIL_TICKET_RE = re.compile(
     r"https?://(?:t-dv\.com/[A-Za-z0-9_\-]+|ticketdive\.com/event/[A-Za-z0-9_\-]+"
-    r"|tiget\.net/events/\d+|(?:t\.)?livepocket\.jp/e/[A-Za-z0-9_\-]+)")
-# 「開催場所」「会場」の欄。値は見出しの次の行に書かれることが多い
-_DETAIL_VENUE_RE = re.compile(r"(?:^|\n)\s*(?:開催場所|会場)\s*[:：]?\s*\n?\s*([^\n]{2,40})")
+    r"|tiget\.net/events/\d+|(?:t\.)?livepocket\.jp/e/[A-Za-z0-9_\-]+"
+    r"|eplus\.jp/(?:sf/detail/[0-9A-Za-z\-]+|[A-Za-z0-9_\-]+/?)(?=[\s)）]|$)"
+    r"|w\.pia\.jp/t/[A-Za-z0-9_\-]+/?|l-tike\.com/[A-Za-z0-9_\-/]+)", re.M)
+# 「開催場所」「会場」の欄(「【会場】」とも書く)。値は見出しの次の行に書かれることが多い
+_DETAIL_VENUE_RE = re.compile(
+    r"(?:^|\n)\s*[【［\[]?\s*(?:開催場所|会場)\s*[】］\]]?\s*[:：]?\s*\n?\s*([^\n【［\[]{2,40})")
+# 「【出演者】」「出演予定」「LINE UP」の欄。次の見出し(【…】)・注記(※)までを読む
+_DETAIL_LINEUP_RE = re.compile(
+    r"(?:^|\n)\s*[【［\[]?\s*(?:出演者?|出演予定|LINE\s*UP|ラインナップ)[^\n】］\]]{0,6}[】］\]]?\s*[:：]?"
+    r"(.{0,500}?)(?=\n\s*[【［\[※]|\Z)", re.S | re.I)
 # 「10:40open」のように時刻が先に来る書き方
 _OPEN_AFTER_RE = re.compile(r"(\d{1,2})[:：](\d{2})\s*(?:open|OPEN|開場)")
 _detail_cache: dict = {}
@@ -709,6 +716,10 @@ def _detail_page_text(url: str) -> Optional[str]:
         return _detail_cache[url]
     text = None
     html = sites._get(url)
+    if not html or len(sites._html_to_text(html)) < 200:
+        # 証明書の不備で普通には取れないサイト(私立恵比寿中学)や、JS で描くページは
+        # ブラウザで開く
+        html = sites._fetch_subpage(url)
     if html:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
@@ -720,6 +731,20 @@ def _detail_page_text(url: str) -> Optional[str]:
         text = re.split(r"\n\s*(?:カテゴリー|アーカイブ|関連記事|最近の投稿)\s*\n", text)[0]
     _detail_cache[url] = text
     return text
+
+
+def detail_lineup_text(row: dict, site_url: str) -> str:
+    """公演の詳細ページの出演者欄(その公演日が書かれたページだけ)。無ければ空。"""
+    url = row.get("tweet_url") or ""
+    m = re.match(r"\d{4}-(\d{2})-(\d{2})", (row.get("event_datetime") or "")[:10])
+    if (not m or urllib.parse.urlparse(url).netloc != urllib.parse.urlparse(site_url).netloc
+            or url.rstrip("/") == site_url.rstrip("/")):
+        return ""
+    text = _detail_page_text(url)
+    if not text or (int(m.group(1)), int(m.group(2))) not in sites.dates_in_text(text):
+        return ""
+    lu = _DETAIL_LINEUP_RE.search(text)
+    return lu.group(1).strip() if lu else ""
 
 
 def enrich_site_row_from_detail(row: dict, site_url: str) -> dict:
@@ -1218,6 +1243,16 @@ def run_sites() -> int:
         print(f"  既存カレンダーの確認に失敗(全グループで探します): {e}")
         cal_known = set()
     dead = 0         # LLMが連続して使えなかった回数
+    # 公演名や詳細ページの出演者欄に名前がある、ほかの登録グループにも公演を入れる
+    # (「#スタダ顔 ライブ」は私立恵比寿中学のサイトにしか無く、出演する
+    #  ばってん少女隊・いぎなり東北産のページに出ていなかった)
+    try:
+        lineup_idx = lineup.build_index(build_idol_name_list())
+    except Exception as e:
+        print(f"  出演者の相互反映に使う一覧の取得に失敗(反映しません): {e}")
+        lineup_idx = []
+    fanout = 0
+    fanout_slugs = set()
     for entry in watch:
         slug, name, url = entry["idol_slug"], entry["name"], entry["site_url"]
         print(f"{name} の公式サイトを確認: {url}")
@@ -1291,6 +1326,11 @@ def run_sites() -> int:
                     count += 1
                 except Exception as e:
                     print(f"  書き込み失敗: {e}")
+                    continue
+                if lineup_idx:
+                    names = detail_lineup_text(row, url)
+                    fanout += _fanout_lineup(dict(row, raw_text=names or None), lineup_idx,
+                                             today, fanout_slugs)
 
         if llm_ok:
             try:
@@ -1320,6 +1360,11 @@ def run_sites() -> int:
                         if old_id not in emitted_ids:
                             sb.delete_auto_event(old_id)
                             removed += 1
+                            # その公演をほかのグループに反映した行(ttx:<先>:<slug>:<key>:<日付>)も消す
+                            src = old_id[len("site:"):]
+                            ttx = sb.get_auto_event_ids_like(f"ttx:*:{src}:*")
+                            if ttx:
+                                sb.delete_auto_events(ttx)
                 except Exception as e:
                     print(f"  再突合(削除)でエラー: {e}")
                 if count == 0 and not retry_zero and sites.has_future_dates(combined):
@@ -1339,6 +1384,8 @@ def run_sites() -> int:
         total += count
         if llm_ok:
             processed.append(slug)
+    if fanout:
+        print(f"公式サイトの公演を、出演するほかのグループにも反映: {fanout} 件 / {len(fanout_slugs)} グループ")
     if processed and not os.environ.get("SITE_SLUGS", "").strip():
         try:
             sb.set_last_seen_many([(f"sq:{s2}", today) for s2 in processed])

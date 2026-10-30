@@ -265,6 +265,16 @@ def get_auto_event_ids(idol_slug: str, prefix: str = "tt:"):
     return [r["tweet_id"] for r in (rows or [])]
 
 
+def get_auto_event_ids_like(pattern: str):
+    """tweet_id が pattern(PostgREST の like。* が任意の文字列)に合う行の tweet_id 一覧。"""
+    _, rows = _request(
+        "GET",
+        "auto_events",
+        params={"select": "tweet_id", "tweet_id": f"like.{pattern}", "limit": 1000},
+    )
+    return [r["tweet_id"] for r in (rows or [])]
+
+
 def get_auto_event_rows_by_prefix(prefix: str):
     """tweet_id が prefix で始まる行を [{tweet_id, idol_slug, event_name}] で全件返す。
 
