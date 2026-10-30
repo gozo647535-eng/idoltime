@@ -692,6 +692,73 @@ def build_site_row(slug: str, name: str, site_url: str, ev, page_tags=None,
     }
 
 
+# 公演ごとの詳細ページに書かれているチケットの販売ページ(本文にURLだけが書かれていることも多い)
+_DETAIL_TICKET_RE = re.compile(
+    r"https?://(?:t-dv\.com/[A-Za-z0-9_\-]+|ticketdive\.com/event/[A-Za-z0-9_\-]+"
+    r"|tiget\.net/events/\d+|(?:t\.)?livepocket\.jp/e/[A-Za-z0-9_\-]+)")
+# 「開催場所」「会場」の欄。値は見出しの次の行に書かれることが多い
+_DETAIL_VENUE_RE = re.compile(r"(?:^|\n)\s*(?:開催場所|会場)\s*[:：]?\s*\n?\s*([^\n]{2,40})")
+# 「10:40open」のように時刻が先に来る書き方
+_OPEN_AFTER_RE = re.compile(r"(\d{1,2})[:：](\d{2})\s*(?:open|OPEN|開場)")
+_detail_cache: dict = {}
+
+
+def _detail_page_text(url: str) -> Optional[str]:
+    """詳細ページの本文(記事の部分だけ。サイドバーの別公演を拾わないように)。"""
+    if url in _detail_cache:
+        return _detail_cache[url]
+    text = None
+    html = sites._get(url)
+    if html:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for t in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            t.decompose()
+        main = soup.find("article") or soup.find("main") or soup.body or soup
+        text = re.sub(r"\n\s*\n+", "\n", main.get_text("\n"))
+        # サイドバー(カテゴリー・アーカイブの一覧)より前だけを使う
+        text = re.split(r"\n\s*(?:カテゴリー|アーカイブ|関連記事|最近の投稿)\s*\n", text)[0]
+    _detail_cache[url] = text
+    return text
+
+
+def enrich_site_row_from_detail(row: dict, site_url: str) -> dict:
+    """公式サイトの行に、その公演の詳細ページからチケットのリンク・開場時刻・会場を補う。
+
+    スケジュール一覧には「11/1【sun】LIVE-ATTACK!! in 榴岡野音 @仙台」のように
+    日付と公演名しか無く、時刻・会場・チケットは公演ごとのページにだけ書かれている
+    ことが多い(POEM の公式サイト)。チケットのリンクが入れば、その販売ページの
+    出演者一覧から共演グループにも公演が入る。
+    詳細ページがその公演のものか(公演日が書かれているか)を確かめてから使う。
+    """
+    url = row.get("tweet_url") or ""
+    host = urllib.parse.urlparse(site_url).netloc
+    if (not url or urllib.parse.urlparse(url).netloc != host
+            or url.rstrip("/") == site_url.rstrip("/")):
+        return row
+    if row.get("ticket_url") and row.get("open_time") and row.get("other_details"):
+        return row
+    date = (row.get("event_datetime") or "")[:10]
+    m = re.match(r"\d{4}-(\d{2})-(\d{2})$", date)
+    text = _detail_page_text(url) if m else None
+    if not text or (int(m.group(1)), int(m.group(2))) not in sites.dates_in_text(text):
+        return row
+    if not row.get("ticket_url"):
+        t = _DETAIL_TICKET_RE.search(text)
+        if t:
+            row["ticket_url"] = t.group(0)
+    if not row.get("open_time"):
+        # 「10:40open 11:00start」は先に時刻が来る。開場の後ろの語から読むと開演(11:00)を拾う
+        o = _OPEN_AFTER_RE.search(text)
+        row["open_time"] = (f"{int(o.group(1)):02d}:{o.group(2)}" if o
+                            else timetree.extract_open_entry(text)[0])
+    v = _DETAIL_VENUE_RE.search(text)
+    # 一覧から取れた会場が地名だけ(「郡山」「仙台」)なら、詳細ページの会場名にする
+    if v and len(row.get("other_details") or "") <= 4:
+        row["other_details"] = clean_venue(v.group(1).strip()) or row.get("other_details")
+    return row
+
+
 def build_gcal_row(slug: str, name: str, gc_url: str, ev: dict) -> Optional[dict]:
     """Google カレンダーの整形済みイベントを auto_events 行に変換。"""
     if not ev.get("title"):
@@ -933,6 +1000,8 @@ def merge_site_events(jsonld_events, gemini_events):
 # 65組だとフル巡回42分の半分以上をここで使っていた。一方 LLM の日次枠で実際に
 # 抽出できるのは十数組で、残りは取得時間を払うだけになっていた。枠に見合う数に絞る。
 SITE_BATCH = int(os.environ.get("SITE_BATCH") or 30)
+# そのうち、前回の抽出に失敗したサイトの読み直しに使う上限
+SITE_RETRY_MAX = int(os.environ.get("SITE_RETRY_MAX") or 10)
 # LLMが連続でこの回数使えなければ、その回の公式サイト巡回は打ち切る
 LLM_DEAD_LIMIT = int(os.environ.get("LLM_DEAD_LIMIT") or 8)
 # TimeTree も同様。1カレンダーはAPI1回だが、各イベントの TicketDive 補完に
@@ -1102,8 +1171,23 @@ def run_sites() -> int:
         if missing:
             print(f"  公式サイトリンクが無く巡回できない slug: {', '.join(sorted(missing))}")
     else:
-        watch = _rotate(watch, datetime.datetime.now(JST).strftime("%Y-%m-%d"),
-                        "sq", SITE_BATCH, "公式サイト", record=False)
+        # 前回の抽出で失敗の印(本文に今後の日付があるのに0件 = |z1、大きく減った = |low)が
+        # 付いたサイトは、順番を待たずに今回読み直す。順番は「今後の公演が少ない順」なので、
+        # ほかの経路で何件か取れているグループ(POEM)は公式サイトが0件のまま
+        # 何日も回ってこず、目の前の公演を取りこぼしていた。
+        try:
+            states = sb.get_last_seen_by_prefix("site:")
+        except Exception as e:
+            print(f"  抽出の状態の取得に失敗(読み直しの優先はしません): {e}")
+            states = {}
+        retry = [w for w in watch
+                 if str(states.get(f"site:{w['idol_slug']}") or "").endswith(("|z1", "|low"))]
+        retry = retry[:SITE_RETRY_MAX]
+        if retry:
+            print(f"  前回抽出に失敗したサイトを先に読み直します: {len(retry)} 件")
+        rest = [w for w in watch if w not in retry]
+        watch = retry + _rotate(rest, datetime.datetime.now(JST).strftime("%Y-%m-%d"),
+                                "sq", max(SITE_BATCH - len(retry), 0), "公式サイト", record=False)
     total = 0
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     processed = []   # 巡回日を記録するグループ(枠切れで抽出できなかった分は入れない)
@@ -1145,7 +1229,9 @@ def run_sites() -> int:
         # ただし「本文に今後の日付があるのに抽出0件」だった回は <hash>|z1 を記録してあり、
         # 内容が同じでも一度だけ取り直す(取りこぼしがそのまま固定化するのを防ぐ)。
         seen = sb.get_last_seen(state_key)
-        if seen == content_hash:
+        # グループを指定した手動実行(SITE_SLUGS)は、取り込みを直したあとに確かめる用なので
+        # 内容が同じでも読み直す
+        if seen == content_hash and not only:
             print("  変更なし。スキップ")
             processed.append(slug)
             continue
@@ -1181,6 +1267,7 @@ def run_sites() -> int:
         for ev in merged:
             row = build_site_row(slug, name, url, ev, page_tags, anchors)
             if row:
+                enrich_site_row_from_detail(row, url)
                 enrich_row_with_ticketdive(row)
                 try:
                     sb.upsert_auto_event(row)
