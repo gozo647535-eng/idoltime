@@ -3085,6 +3085,9 @@ def main() -> int:
     # SITE_ONLY / GCAL_ONLY は、その取り込みだけを回す確認用(数分)。
     if os.environ.get("SITE_ONLY", "").lower() == "true":
         run_sites()
+        # 手で書いた公演(curated_events.json)も取り込む。足したあと、1日1回の巡回を
+        # 待たずに手動実行で反映できるように(数秒で終わる)
+        run_curated()
         return 0
     if os.environ.get("GCAL_ONLY", "").lower() == "true":
         run_gcal()
