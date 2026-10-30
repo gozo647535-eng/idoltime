@@ -597,6 +597,9 @@ def _event_anchor_url(name: str, anchors) -> Optional[str]:
     return None
 
 
+# 一覧のページ(公演ごとのページではない)
+_LIST_PAGE = re.compile(r"/(?:schedules?|calendar|vertical_calendar|news|live|lives|events?|info|information|media|contents|list)/?$"
+                        r"|/(?:schedules?|calendar|vertical_calendar)/\d{4}", re.I)
 _URL_DAY = re.compile(r"(20\d\d)[-/_]?(\d{1,2})[-/_](\d{1,2})(?!\d)")
 
 
@@ -681,6 +684,17 @@ def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
     hit = _dated_anchor_url(ev, dated)
     if hit:
         return hit
+    # 特設ページ: ページの見出しが公演名と6文字以上重なるもの(一覧・ニュースのページは除く)
+    key = _id_name(getattr(ev, "event_name", "") or "")
+    best = (0, None)
+    for title, u in sites.PAGE_TITLES.get(site_url) or []:
+        if _LIST_PAGE.search(urllib.parse.urlparse(u).path) or _other_day(day, title, u):
+            continue
+        n = _common_run(key, _id_name(title))
+        if n > best[0]:
+            best = (n, u)
+    if key and best[0] >= 6:
+        return best[1]
     tag = (getattr(ev, "source_page", None) or "").strip().upper()
     if tag:
         for t, u in (page_tags or []):
@@ -1291,6 +1305,59 @@ _DETAIL_FIELDS = ("ticket_url", "open_time", "other_details", "sale_datetime", "
                   "ticket_types", "event_name", "event_datetime")
 
 
+# 1回の実行で、トップに案内している行のために読み直すサイトの数
+DETAIL_RELINK_SITES = int(os.environ.get("DETAIL_RELINK_SITES") or 20)
+
+
+def _relink_site_rows(rows, site_of, only_slugs, seen, before, is_detail) -> set:
+    """トップ・一覧のページに案内している公式サイトの行に、公演ページを付け直す。
+
+    公演ページは LLM で抜き出したときにしか探していなかったので、そのあと探し方を
+    よくしても、サイトの内容が変わるまで古い案内先のままだった。サイトを読んで
+    (LLM なし)予定表・カレンダーの項目のリンクと特設ページの見出しから探し直す。
+    戻り値: 付け直した行の tweet_id
+    """
+    def needs(r) -> bool:
+        url = r.get("tweet_url") or ""
+        return (not is_detail(r)) or bool(_LIST_PAGE.search(urllib.parse.urlparse(url).path))
+
+    by_slug = {}
+    for r in rows:
+        if r["idol_slug"] in site_of and (not only_slugs or r["idol_slug"] in only_slugs) and needs(r):
+            by_slug.setdefault(r["idol_slug"], []).append(r)
+    slugs = [s for s in by_slug if only_slugs or (seen.get(f"relink:{s}") or "") < before]
+    if not only_slugs:
+        slugs = slugs[:DETAIL_RELINK_SITES]
+    done, changed = [], set()
+    for slug in slugs:
+        site = site_of[slug]
+        try:
+            _h, _c, _ld, _cal, page_tags, anchors = sites.fetch_site_content(site)
+        except Exception as e:
+            print(f"  {slug}: サイトの読み直しに失敗: {e}")
+            continue
+        done.append(slug)
+        for r in by_slug[slug]:
+            ev = sites.SiteEvent(event_name=r["event_name"] or "", event_datetime=r["event_datetime"])
+            url = _site_event_url(ev, site, page_tags, anchors)
+            if url and url != r.get("tweet_url") and url.rstrip("/") != site.rstrip("/") \
+                    and not _LIST_PAGE.search(urllib.parse.urlparse(url).path):
+                try:
+                    sb.patch_auto_event(r["tweet_id"], {"tweet_url": url})
+                    r["tweet_url"] = url
+                    changed.add(r["tweet_id"])
+                except Exception as e:
+                    print(f"  {r['event_name'][:30]}: 案内先の書き込み失敗: {e}")
+    if done:
+        try:
+            sb.set_last_seen_many([(f"relink:{s}", datetime.datetime.now(JST).strftime("%Y-%m-%d"))
+                                   for s in done])
+        except Exception:
+            pass
+        print(f"公演ページの付け直し: {len(done)} サイトを読み、{len(changed)} 件の案内先を公演ページにした")
+    return changed
+
+
 def refresh_site_details(only_slugs=None) -> int:
     """取り込み済みの公式サイトの公演に、公演ページの中身(販売ページ・開場・会場・発売・出演者)を足す。
 
@@ -1304,7 +1371,8 @@ def refresh_site_details(only_slugs=None) -> int:
     try:
         site_of = {w["idol_slug"]: w["site_url"] for w in build_site_watch_list(include_skipped=True)}
         rows = sb.get_site_rows_for_detail(today)
-        seen = {} if only_slugs else sb.get_last_seen_by_prefix("detail:")
+        seen = {} if only_slugs else {**sb.get_last_seen_by_prefix("detail:"),
+                                      **sb.get_last_seen_by_prefix("relink:")}
     except Exception as e:
         print(f"公演ページの読み直し: 準備に失敗(見送ります): {e}")
         return 0
@@ -1317,9 +1385,11 @@ def refresh_site_details(only_slugs=None) -> int:
         return (bool(site) and urllib.parse.urlparse(url).netloc == urllib.parse.urlparse(site).netloc
                 and url.rstrip("/") != site.rstrip("/"))
 
+    # トップや一覧のページに案内している行は、サイトを読み直して(LLM なし)公演ページを付け直す
+    relinked = _relink_site_rows(rows, site_of, only_slugs, seen, before, is_detail)
     cand = [r for r in rows
             if (not only_slugs or r["idol_slug"] in only_slugs) and is_detail(r)
-            and (seen.get(f"detail:{r['tweet_id']}") or "") < before]
+            and ((seen.get(f"detail:{r['tweet_id']}") or "") < before or r["tweet_id"] in relinked)]
     if not only_slugs:
         cand = cand[:DETAIL_REFRESH_LIMIT]
     if not cand:
