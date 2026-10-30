@@ -30,7 +30,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # v13: 凝縮の優先順位を見直し、今後の日付を含む箇所を先に残す。
 # v14: チケット受付を独立イベントにせず、公演のsale_datetimeへ入れる指示を追加。
 # v15: JSON破損で0件確定していたサイトを取り直す(120bモデル+再生成の修正を反映)。
-PROMPT_VERSION = "v25"  # 今後の日付の判定・行頭の空白・翌月の予定表を直したので再抽出
+PROMPT_VERSION = "v26"  # 年の無い過ぎた日付を来年と読んでいたのを直したので再抽出
 
 # 静的HTMLの可視テキストがこれ未満なら JS描画(SPA)とみなし、ヘッドレスで取り直す
 RENDER_MIN_CHARS = 1500
@@ -1556,6 +1556,10 @@ def fetch_site_content(site_url: str):
     return content_hash, combined, jsonld_events, cal_links, page_urls, anchors
 
 
+# 年の無い日付が今年のこの日数以内の過去なら、来年ではなく終わった日と見る
+YEARLESS_PAST_DAYS = 120
+
+
 def has_future_dates(text: str) -> bool:
     """本文に今日以降(1年以内)の日付が含まれるか。
 
@@ -1580,12 +1584,20 @@ def has_future_dates(text: str) -> bool:
     # 年付きの日付は上で見たので外す。残すと「2026.10.05」の「10.05」を来年の
     # 10/5 と読み、終わった日を今後の日付としてしまう(過ぎた日の予定が優先され、
     # 翌月の公演が字数の枠から押し出されていた)。
+    # 今年の日付として少し前(YEARLESS_PAST_DAYS 日以内)なら、終わった日と見る。
+    # 来年の同じ日と読むと、月ごとの予定表で先月・今月前半の公演(「10/2（金）」)が
+    # すべて今後の日付になり、翌月の公演が字数の枠から押し出される(踊れ！神風)。
+    # 年明けの予定(11月に書かれた「1/10」)は、今年としては遠い過去なので来年と読む。
     for m in re.finditer(r"(?<!\d)(\d{1,2})[/月.](\d{1,2})日?(?!\d)", re.sub(full, " ", text)):
-        for y in (today.year, today.year + 1):
+        try:
+            d = _dt.date(today.year, int(m.group(1)), int(m.group(2)))
+        except ValueError:
+            continue
+        if d < today and (today - d).days > YEARLESS_PAST_DAYS:
             try:
-                d = _dt.date(y, int(m.group(1)), int(m.group(2)))
+                d = _dt.date(today.year + 1, d.month, d.day)
             except ValueError:
                 continue
-            if today <= d <= limit:
-                return True
+        if today <= d <= limit:
+            return True
     return False
