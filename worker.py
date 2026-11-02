@@ -653,14 +653,65 @@ def _dated_anchor_url(ev, dated) -> Optional[str]:
     return next(iter(urls)) if len(urls) == 1 and len({u for _t, u, _o in same}) == 1 else None
 
 
+def _source_page_matches(ev, url: str) -> bool:
+    """案内先の候補のページが、本当にこの公演のものか。
+
+    公演名の一部が含まれるだけでは足りない。Mär mi の 11 月のフリーライブ5公演が、
+    曲名として「Lost in Wonderland」を含む 10/11 の別公演のページに案内されていた。
+    そのため本文に日付があれば公演日で決め、日付が無いときだけ公演名の重なりを見る。
+    本文が取れないときや公演日が不明なときは確かめられないので、正しいリンクを落とさないよう採る。
+    """
+    day = (normalize_event_datetime(getattr(ev, "event_datetime", None)) or "")[:10]
+    try:
+        base = datetime.date.fromisoformat(day) - datetime.timedelta(days=30)
+    except ValueError:
+        return True
+    try:
+        text = _detail_page_text(url)
+    except Exception:
+        return True
+    if not (text or "").strip():
+        return True
+    # _dates_of は年つきの日付が1つでもあると年なしを読まない。掲載日や受付期間だけが
+    # 年つきで公演日が「11月8日」のページを落とさないよう、年つきを除いた分も読む
+    dates = set(sites._dates_of(text, base)) | set(sites._dates_of(sites._YMD.sub(" ", text), base))
+    if dates:
+        if day in dates:
+            return True
+        print(f"  案内先を照合で除外: {url} (公演日 {day} がページに無い)")
+        return False
+    key, body = _id_name(getattr(ev, "event_name", "") or ""), _id_name(text)
+    if key and (key in body or _common_run(key, body) >= 6):
+        return True
+    print(f"  案内先を照合で除外: {url} (ページに日付が無く公演名とも重ならない)")
+    return False
+
+
 def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
-    """公演の案内先URL。
+    """公演の案内先URL。候補を順に照合し、最初に通ったものを返す。
+
+    どの候補も通らなければサイトのトップ(トップは照合しない)。
+    チケットURLが無い公演はアプリからここへ案内する。
+    """
+    rejected = set()
+    for url in _site_url_candidates(ev, site_url, page_tags, anchors):
+        if url.rstrip("/") == site_url.rstrip("/"):
+            return url
+        if url not in rejected:
+            if _source_page_matches(ev, url):
+                return url
+            rejected.add(url)
+    return site_url
+
+
+def _site_url_candidates(ev, site_url: str, page_tags=None, anchors=None):
+    """案内先の候補を優先順に返す(照合で落ちたときだけ次を探す)。
 
     ① 構造化データが持っていた公演ページのURL(同じサイト内のときだけ採る)
     ② 公演名に一致するリンク(= その公演の詳細ページ)
-    ③ LLM が答えたページ番号(P1 等)に対応するURL
-    ④ どれも無ければサイトのトップ
-    の順に選ぶ。チケットURLが無い公演はアプリからここへ案内する。
+    ③ 同じ日付の予定の項目からのリンク
+    ④ 見出しが公演名と重なる特設ページ
+    ⑤ LLM が答えたページ番号(P1 等)に対応するURL
     """
     def host(u: str) -> str:
         return urllib.parse.urlparse(u).netloc.lower().removeprefix("www.")
@@ -669,7 +720,7 @@ def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
     if src.startswith("http"):
         try:
             if host(src) == host(site_url):
-                return src
+                yield src
         except Exception:
             pass
     day = (normalize_event_datetime(getattr(ev, "event_datetime", None)) or "")[:10]
@@ -679,11 +730,11 @@ def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
     anchors = [(t, u) for t, u in (anchors or []) if not _other_day(day, t, u)]
     hit = _event_anchor_url(getattr(ev, "event_name", "") or "", anchors)
     if hit and hit.rstrip("/") != site_url.rstrip("/"):
-        return hit
+        yield hit
     dated = [x for x in (sites.DATED_ANCHORS.get(site_url) or []) if not _other_day(day, "", x[2])]
     hit = _dated_anchor_url(ev, dated)
     if hit:
-        return hit
+        yield hit
     # 特設ページ: ページの見出しが公演名と6文字以上重なるもの(一覧・ニュースのページは除く)
     key = _id_name(getattr(ev, "event_name", "") or "")
     best = (0, None)
@@ -694,13 +745,13 @@ def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
         if n > best[0]:
             best = (n, u)
     if key and best[0] >= 6:
-        return best[1]
+        yield best[1]
     tag = (getattr(ev, "source_page", None) or "").strip().upper()
     if tag:
         for t, u in (page_tags or []):
             if t == tag:
-                return u
-    return site_url
+                yield u
+                return
 
 
 # ページの見出しだけで、公演名になっていないもの
