@@ -653,38 +653,43 @@ def _dated_anchor_url(ev, dated) -> Optional[str]:
     return next(iter(urls)) if len(urls) == 1 and len({u for _t, u, _o in same}) == 1 else None
 
 
-def _source_page_matches(ev, url: str) -> bool:
-    """案内先の候補のページが、本当にこの公演のものか。
+def _source_page_verdict(ev, url: str) -> str:
+    """案内先のページが、本当にこの公演のものか。"match" / "mismatch" / "unknown" で返す。
 
     公演名の一部が含まれるだけでは足りない。Mär mi の 11 月のフリーライブ5公演が、
     曲名として「Lost in Wonderland」を含む 10/11 の別公演のページに案内されていた。
     そのため本文に日付があれば公演日で決め、日付が無いときだけ公演名の重なりを見る。
-    本文が取れないときや公演日が不明なときは確かめられないので、正しいリンクを落とさないよう採る。
+    本文が取れないときや公演日が不明なときは確かめられないので "unknown"。
     """
     day = (normalize_event_datetime(getattr(ev, "event_datetime", None)) or "")[:10]
     try:
         base = datetime.date.fromisoformat(day) - datetime.timedelta(days=30)
     except ValueError:
-        return True
+        return "unknown"
     try:
         text = _detail_page_text(url)
     except Exception:
-        return True
+        return "unknown"
     if not (text or "").strip():
-        return True
+        return "unknown"
     # _dates_of は年つきの日付が1つでもあると年なしを読まない。掲載日や受付期間だけが
     # 年つきで公演日が「11月8日」のページを落とさないよう、年つきを除いた分も読む
     dates = set(sites._dates_of(text, base)) | set(sites._dates_of(sites._YMD.sub(" ", text), base))
     if dates:
         if day in dates:
-            return True
+            return "match"
         print(f"  案内先を照合で除外: {url} (公演日 {day} がページに無い)")
-        return False
+        return "mismatch"
     key, body = _id_name(getattr(ev, "event_name", "") or ""), _id_name(text)
     if key and (key in body or _common_run(key, body) >= 6):
-        return True
+        return "match"
     print(f"  案内先を照合で除外: {url} (ページに日付が無く公演名とも重ならない)")
-    return False
+    return "mismatch"
+
+
+def _source_page_matches(ev, url: str) -> bool:
+    """案内先の候補として採ってよいか。確かめられないページは、正しいリンクを落とさないよう採る。"""
+    return _source_page_verdict(ev, url) != "mismatch"
 
 
 def _site_event_url(ev, site_url: str, page_tags=None, anchors=None) -> str:
@@ -1356,56 +1361,87 @@ _DETAIL_FIELDS = ("ticket_url", "open_time", "other_details", "sale_datetime", "
                   "ticket_types", "event_name", "event_datetime")
 
 
-# 1回の実行で、トップに案内している行のために読み直すサイトの数
+# 1回の実行で、案内先を確かめる(トップ・一覧の行は付け直す)サイトの数
 DETAIL_RELINK_SITES = int(os.environ.get("DETAIL_RELINK_SITES") or 20)
 
 
 def _relink_site_rows(rows, site_of, only_slugs, seen, before, is_detail) -> set:
-    """トップ・一覧のページに案内している公式サイトの行に、公演ページを付け直す。
+    """公式サイトの行の案内先を確かめ、付け直す。
 
-    公演ページは LLM で抜き出したときにしか探していなかったので、そのあと探し方を
-    よくしても、サイトの内容が変わるまで古い案内先のままだった。サイトを読んで
-    (LLM なし)予定表・カレンダーの項目のリンクと特設ページの見出しから探し直す。
-    戻り値: 付け直した行の tweet_id
+    トップ・一覧のページに案内している行: 公演ページは LLM で抜き出したときにしか
+    探していなかったので、そのあと探し方をよくしても、サイトの内容が変わるまで古い
+    案内先のままだった。サイトを読んで(LLM なし)予定表・カレンダーの項目のリンクと
+    特設ページの見出しから探し直す。トップ・一覧には付け替えない。
+    公演ページに案内している行: 保存時の照合が入る前の誤ったリンクが残っているので、
+    いまの案内先を照合する。別の公演のページと分かった行だけ探し直し、見つからなければ
+    誤った案内を消すためトップにする。確かめられない行(unknown)は触らない。
+    戻り値: 案内先を書き換えた行の tweet_id
     """
     def needs(r) -> bool:
         url = r.get("tweet_url") or ""
         return (not is_detail(r)) or bool(_LIST_PAGE.search(urllib.parse.urlparse(url).path))
 
+    def event_of(r):
+        return sites.SiteEvent(event_name=r["event_name"] or "", event_datetime=r["event_datetime"])
+
     by_slug = {}
     for r in rows:
-        if r["idol_slug"] in site_of and (not only_slugs or r["idol_slug"] in only_slugs) and needs(r):
+        if r["idol_slug"] in site_of and (not only_slugs or r["idol_slug"] in only_slugs):
             by_slug.setdefault(r["idol_slug"], []).append(r)
     slugs = [s for s in by_slug if only_slugs or (seen.get(f"relink:{s}") or "") < before]
     if not only_slugs:
         slugs = slugs[:DETAIL_RELINK_SITES]
     done, changed = [], set()
+    read = repaired = to_top = 0
     for slug in slugs:
         site = site_of[slug]
+        # 公演ページの行を先に照合する。付け直す行が無いサイトはトップから読み直さずに済む
+        mismatched = {r["tweet_id"] for r in by_slug[slug]
+                      if not needs(r) and _source_page_verdict(event_of(r), r.get("tweet_url")) == "mismatch"}
+        targets = [r for r in by_slug[slug] if needs(r) or r["tweet_id"] in mismatched]
+        if not targets:
+            done.append(slug)
+            continue
         try:
             _h, _c, _ld, _cal, page_tags, anchors = sites.fetch_site_content(site)
         except Exception as e:
             print(f"  {slug}: サイトの読み直しに失敗: {e}")
             continue
         done.append(slug)
-        for r in by_slug[slug]:
-            ev = sites.SiteEvent(event_name=r["event_name"] or "", event_datetime=r["event_datetime"])
-            url = _site_event_url(ev, site, page_tags, anchors)
-            if url and url != r.get("tweet_url") and url.rstrip("/") != site.rstrip("/") \
-                    and not _LIST_PAGE.search(urllib.parse.urlparse(url).path):
-                try:
-                    sb.patch_auto_event(r["tweet_id"], {"tweet_url": url})
-                    r["tweet_url"] = url
-                    changed.add(r["tweet_id"])
-                except Exception as e:
-                    print(f"  {r['event_name'][:30]}: 案内先の書き込み失敗: {e}")
+        read += 1
+        for r in targets:
+            url = _site_event_url(event_of(r), site, page_tags, anchors)
+            is_page = bool(url) and url.rstrip("/") != site.rstrip("/") \
+                and not _LIST_PAGE.search(urllib.parse.urlparse(url).path)
+            wrong = r["tweet_id"] in mismatched
+            if not is_page:
+                if not wrong:
+                    continue
+                url = site
+            if url == r.get("tweet_url"):
+                continue
+            old = r.get("tweet_url")
+            try:
+                sb.patch_auto_event(r["tweet_id"], {"tweet_url": url})
+            except Exception as e:
+                print(f"  {(r['event_name'] or '')[:30]}: 案内先の書き込み失敗: {e}")
+                continue
+            r["tweet_url"] = url
+            changed.add(r["tweet_id"])
+            if wrong:
+                repaired += 1
+                to_top += not is_page
+                # 元の URL はどこにも残らないので、誤判定に気づけるようログに残す
+                print(f"  案内先を修復: {(r['event_name'] or '')[:30]} ({r['event_datetime']}): {old} → {url}")
     if done:
         try:
             sb.set_last_seen_many([(f"relink:{s}", datetime.datetime.now(JST).strftime("%Y-%m-%d"))
                                    for s in done])
         except Exception:
             pass
-        print(f"公演ページの付け直し: {len(done)} サイトを読み、{len(changed)} 件の案内先を公演ページにした")
+        print(f"公演ページの付け直し: {len(done)} サイトを確かめ({read} サイトを読み直し)、"
+              f"{len(changed) - repaired} 件の案内先を公演ページにした / "
+              f"不一致 {repaired} 件を付け替えた(うちトップへ {to_top} 件)")
     return changed
 
 
@@ -1436,7 +1472,7 @@ def refresh_site_details(only_slugs=None) -> int:
         return (bool(site) and urllib.parse.urlparse(url).netloc == urllib.parse.urlparse(site).netloc
                 and url.rstrip("/") != site.rstrip("/"))
 
-    # トップや一覧のページに案内している行は、サイトを読み直して(LLM なし)公演ページを付け直す
+    # 案内先を確かめ、トップ・一覧の行と別の公演のページを指す行を(LLM なしで)付け直す
     relinked = _relink_site_rows(rows, site_of, only_slugs, seen, before, is_detail)
     cand = [r for r in rows
             if (not only_slugs or r["idol_slug"] in only_slugs) and is_detail(r)

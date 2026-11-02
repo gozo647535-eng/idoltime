@@ -3,6 +3,7 @@
 ネットワークには触れない。_detail_page_text を差し替える。
 """
 import os
+import urllib.parse
 from types import SimpleNamespace
 
 import pytest
@@ -214,3 +215,247 @@ def test_same_url_is_fetched_once_across_events(monkeypatch):
         url = worker._site_event_url(event(event_datetime=day), SITE, anchors=[(NAME, DETAIL)])
         assert url == SITE
     assert calls == [DETAIL]
+
+
+# --- 三値の判定 ---
+
+def test_verdict_date_present_is_match(pages):
+    pages.bodies[DETAIL] = "2026年11月8日(日) 東京"
+    assert worker._source_page_verdict(event(), DETAIL) == "match"
+
+
+def test_verdict_other_date_is_mismatch(pages):
+    pages.bodies[DETAIL] = WRONG_PAGE
+    assert worker._source_page_verdict(event(), DETAIL) == "mismatch"
+
+
+def test_verdict_no_date_with_name_overlap_is_match(pages):
+    pages.bodies[DETAIL] = "Lost in Wonderland リリース記念 開催決定"
+    assert worker._source_page_verdict(event(), DETAIL) == "match"
+
+
+def test_verdict_no_date_without_name_overlap_is_mismatch(pages):
+    pages.bodies[DETAIL] = "新しいグッズのお知らせ"
+    assert worker._source_page_verdict(event(), DETAIL) == "mismatch"
+
+
+@pytest.mark.parametrize("body", [None, "", " \n "])
+def test_verdict_unreadable_page_is_unknown_and_still_accepted(pages, body):
+    pages.bodies[DETAIL] = body
+    assert worker._source_page_verdict(event(), DETAIL) == "unknown"
+    assert worker._source_page_matches(event(), DETAIL) is True
+
+
+def test_verdict_fetch_error_is_unknown(monkeypatch):
+    def boom(_url):
+        raise OSError("network down")
+
+    monkeypatch.setattr(worker, "_detail_page_text", boom)
+    assert worker._source_page_verdict(event(), DETAIL) == "unknown"
+
+
+def test_verdict_unknown_event_date_is_unknown_without_reading(pages):
+    pages.bodies[DETAIL] = WRONG_PAGE
+    assert worker._source_page_verdict(event(event_datetime=None), DETAIL) == "unknown"
+    assert pages.reads == []
+
+
+# --- 保存済みの行の付け直し ---
+
+SLUG = "marmi"
+LIST_URL = "https://marmi.tokyo/schedule"
+RIGHT_PAGE = "2026年11月8日(日) Lost in Wonderland フリーライブ"
+
+
+def row(tweet_url, tweet_id="site:1", **overrides):
+    fields = {"tweet_id": tweet_id, "idol_slug": SLUG, "event_name": NAME,
+              "event_datetime": "2026-11-08", "tweet_url": tweet_url}
+    fields.update(overrides)
+    return fields
+
+
+def is_detail(r):
+    # refresh_site_details の is_detail と同じ条件
+    url = r.get("tweet_url") or ""
+    return (urllib.parse.urlparse(url).netloc == urllib.parse.urlparse(SITE).netloc
+            and url.rstrip("/") != SITE.rstrip("/"))
+
+
+@pytest.fixture
+def relink(pages, monkeypatch):
+    """サイトの読み直しと書き込みを差し替えて _relink_site_rows を呼ぶ。"""
+    state = SimpleNamespace(anchors=[], fetches=[], patches=[], seen_marks=[],
+                            fail_fetch=False, fail_patch=False, pages=pages)
+
+    def fetch(site):
+        state.fetches.append(site)
+        if state.fail_fetch:
+            raise OSError("site down")
+        return None, "", [], [], [], state.anchors
+
+    def patch(tweet_id, body):
+        if state.fail_patch:
+            raise OSError("db down")
+        state.patches.append((tweet_id, body))
+
+    monkeypatch.setattr(sites, "fetch_site_content", fetch)
+    monkeypatch.setattr(worker.sb, "patch_auto_event", patch)
+    monkeypatch.setattr(worker.sb, "set_last_seen_many", state.seen_marks.extend)
+
+    def run(rows, seen=None):
+        return worker._relink_site_rows(rows, {SLUG: SITE}, None, seen or {}, "2026-11-01", is_detail)
+
+    state.run = run
+    return state
+
+
+def test_mismatched_detail_row_moves_to_right_page(relink, capsys):
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    relink.pages.bodies[OTHER] = RIGHT_PAGE
+    relink.anchors = [(NAME, OTHER)]
+    r = row(DETAIL)
+    assert relink.run([r]) == {"site:1"}
+    assert relink.patches == [("site:1", {"tweet_url": OTHER})]
+    assert r["tweet_url"] == OTHER
+    out = capsys.readouterr().out
+    assert f"{DETAIL} → {OTHER}" in out
+    assert "不一致 1 件を付け替えた(うちトップへ 0 件)" in out
+
+
+def test_mismatched_detail_row_without_candidate_falls_to_top(relink, capsys):
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    r = row(DETAIL)
+    assert relink.run([r]) == {"site:1"}
+    assert relink.patches == [("site:1", {"tweet_url": SITE})]
+    assert r["tweet_url"] == SITE
+    assert "不一致 1 件を付け替えた(うちトップへ 1 件)" in capsys.readouterr().out
+
+
+def test_mismatched_detail_row_rejected_candidate_falls_to_top(relink):
+    # 候補があっても同じ誤ったページなら付け替え先にしない
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    relink.anchors = [(NAME, DETAIL)]
+    r = row(DETAIL)
+    relink.run([r])
+    assert r["tweet_url"] == SITE
+
+
+def test_mismatched_detail_row_does_not_move_to_list_page(relink):
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    relink.pages.bodies[LIST_URL] = RIGHT_PAGE
+    relink.anchors = [(NAME, LIST_URL)]
+    r = row(DETAIL)
+    relink.run([r])
+    assert r["tweet_url"] == SITE
+
+
+def test_matching_detail_row_is_not_touched(relink):
+    relink.pages.bodies[DETAIL] = RIGHT_PAGE
+    relink.pages.bodies[OTHER] = RIGHT_PAGE
+    relink.anchors = [(NAME, OTHER)]
+    r = row(DETAIL)
+    assert relink.run([r]) == set()
+    assert relink.patches == []
+    assert r["tweet_url"] == DETAIL
+
+
+def test_unreadable_detail_row_is_not_touched(relink):
+    r = row(DETAIL)  # 本文が取れない
+    assert relink.run([r]) == set()
+    assert relink.patches == []
+    assert r["tweet_url"] == DETAIL
+
+
+def test_detail_rows_without_mismatch_skip_the_site_fetch(relink):
+    relink.pages.bodies[DETAIL] = RIGHT_PAGE
+    relink.run([row(DETAIL)])
+    assert relink.fetches == []
+    # 確かめたサイトとして記録され、次の順番まで回ってこない
+    assert [k for k, _v in relink.seen_marks] == [f"relink:{SLUG}"]
+
+
+def test_mismatched_row_stays_when_site_fetch_fails(relink):
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    relink.fail_fetch = True
+    r = row(DETAIL)
+    assert relink.run([r]) == set()
+    assert r["tweet_url"] == DETAIL
+    assert relink.seen_marks == []  # 次の実行でやり直す
+
+
+def test_failed_write_keeps_row_and_is_not_counted(relink, capsys):
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    relink.fail_patch = True
+    r = row(DETAIL)
+    assert relink.run([r]) == set()
+    assert r["tweet_url"] == DETAIL
+    assert "不一致 0 件" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("current", [SITE, LIST_URL])
+def test_top_and_list_rows_are_still_relinked(relink, current, capsys):
+    relink.pages.bodies[DETAIL] = RIGHT_PAGE
+    relink.anchors = [(NAME, DETAIL)]
+    r = row(current)
+    assert relink.run([r]) == {"site:1"}
+    assert r["tweet_url"] == DETAIL
+    out = capsys.readouterr().out
+    assert "1 件の案内先を公演ページにした" in out
+    assert "不一致 0 件" in out
+
+
+def test_list_row_is_not_moved_to_top_without_candidate(relink):
+    # トップへの付け替えは不一致の公演ページの行に限る。一覧の本文が別の日でも同じ
+    relink.pages.bodies[LIST_URL] = WRONG_PAGE
+    r = row(LIST_URL)
+    assert relink.run([r]) == set()
+    assert relink.patches == []
+    assert r["tweet_url"] == LIST_URL
+    assert LIST_URL not in relink.pages.reads
+
+
+def test_top_row_is_not_rewritten_to_list_page(relink):
+    relink.pages.bodies[LIST_URL] = RIGHT_PAGE
+    relink.anchors = [(NAME, LIST_URL)]
+    r = row(SITE)
+    assert relink.run([r]) == set()
+    assert relink.patches == []
+
+
+def test_recently_checked_site_is_skipped(relink):
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    r = row(DETAIL)
+    assert relink.run([r], seen={f"relink:{SLUG}": "2026-11-02"}) == set()
+    assert relink.pages.reads == []
+    assert relink.fetches == []
+
+
+def test_site_limit_applies_to_detail_rows(relink, monkeypatch):
+    monkeypatch.setattr(worker, "DETAIL_RELINK_SITES", 1)
+    relink.pages.bodies[DETAIL] = RIGHT_PAGE
+    relink.pages.bodies[OTHER] = RIGHT_PAGE
+    rows = [row(DETAIL, tweet_id="site:1"), row(OTHER, tweet_id="site:2", idol_slug="other")]
+    worker._relink_site_rows(rows, {SLUG: SITE, "other": SITE}, None, {}, "2026-11-01", is_detail)
+    assert relink.pages.reads == [DETAIL]
+
+
+def test_refresh_reads_repaired_page_but_not_row_moved_to_top(relink, monkeypatch):
+    # 付け替えた行だけ新しいページの中身を読み、トップに落ちた行は読まない
+    relink.pages.bodies[DETAIL] = WRONG_PAGE
+    relink.pages.bodies[OTHER] = "2026年11月14日 東京"
+    relink.anchors = [(NAME, OTHER)]
+    repaired = row(DETAIL, tweet_id="site:1", event_datetime="2026-11-14")
+    moved = row(DETAIL, tweet_id="site:2")
+    enriched = []
+    monkeypatch.setattr(worker, "build_site_watch_list",
+                        lambda include_skipped=False: [{"idol_slug": SLUG, "site_url": SITE}])
+    monkeypatch.setattr(worker.sb, "get_site_rows_for_detail", lambda _today: [repaired, moved])
+    monkeypatch.setattr(worker.sb, "get_last_seen_by_prefix", lambda _prefix: {})
+    monkeypatch.setattr(worker, "enrich_site_row_from_detail",
+                        lambda r, _site: enriched.append(r["tweet_id"]) or r)
+    monkeypatch.setattr(worker, "enrich_row_with_ticketdive", lambda r: r)
+    monkeypatch.setattr(worker, "build_idol_name_list", lambda: [])
+    worker.refresh_site_details()
+    assert repaired["tweet_url"] == OTHER
+    assert moved["tweet_url"] == SITE
+    assert enriched == ["site:1"]
