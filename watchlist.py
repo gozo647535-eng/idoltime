@@ -9,6 +9,7 @@ twikit/Gemini に依存しないため単体テスト可能。
 import json
 import os
 import re
+import unicodedata
 from typing import Optional
 
 import sb
@@ -20,6 +21,9 @@ ACCOUNTS_FILE = "accounts.json"
 # ほとんど成果が無い。そういうグループをここに列挙して巡回対象から外し、
 # 実行時間と LLM 呼び出しを、公式サイトでしか取れないグループに振り向ける。
 SITE_SKIP_FILE = "site_skip.json"
+# 出演者の別表記(slug → 表記の配列)。正規化で吸収できない表記のときだけ足す
+# (LivePocket の「Mǎrmi」は ǎ が ä と別の文字なので Mär mi に当たらない)。
+NAME_ALIASES_FILE = "name_aliases.json"
 
 # https://x.com/handle や https://twitter.com/handle からハンドルを取り出す
 _X_RE = re.compile(r"(?:x\.com|twitter\.com)/@?([A-Za-z0-9_]{1,15})", re.IGNORECASE)
@@ -307,19 +311,41 @@ def build_site_watch_list(include_skipped: bool = False):
     return watch
 
 
+def _load_name_aliases():
+    """slug → 別表記の配列を返す。ファイルが無ければ空。"""
+    try:
+        with open(NAME_ALIASES_FILE, encoding="utf-8") as f:
+            return {_slug_key(slug): names for slug, names in json.load(f).items()}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"{NAME_ALIASES_FILE} の読み込みに失敗(別名なしで続けます): {e}")
+        return {}
+
+
+def _slug_key(slug):
+    """ä が合成済みか分解形かで slug が食い違わないように揃える。"""
+    return unicodedata.normalize("NFC", slug)
+
+
 def build_idol_name_list():
     """図鑑カタログ + 有志追記から、全登録アイドルの [{idol_slug, name}] を作る。
+    別名が登録されているものには aliases も付ける。
 
     公式サイト/TimeTree リンクの有無に関係なく全件返す。TicketDive の出演者一覧と
     名前マッチして「このイベントにうちの登録グループが出るか」を判定するために使う。
     """
     seen = set()
     out = []
+    aliases = _load_name_aliases()
 
     def add(slug, name):
         if not slug or not name or slug in seen:
             return
-        out.append({"idol_slug": slug, "name": name})
+        entry = {"idol_slug": slug, "name": name}
+        if aliases.get(_slug_key(slug)):
+            entry["aliases"] = aliases[_slug_key(slug)]
+        out.append(entry)
         seen.add(slug)
 
     try:
@@ -335,4 +361,9 @@ def build_idol_name_list():
     except Exception as e:
         print(f"idol_info の取得に失敗(名前リスト・スキップ): {e}")
 
+    # 図鑑の取得に失敗したときは slug が揃わないので、未使用の警告は出さない
+    if out:
+        unused = set(aliases) - {_slug_key(e["idol_slug"]) for e in out}
+        if unused:
+            print(f"{NAME_ALIASES_FILE} の slug が図鑑にありません: {sorted(unused)}")
     return out
