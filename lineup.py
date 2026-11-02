@@ -31,15 +31,18 @@ def _is_ascii_word(s: str) -> bool:
 
 
 def build_index(idols) -> List[Tuple[str, str, str, str]]:
-    """(強い正規化名, 実際の表記の軽い正規化, 表示名, slug) を長い順に。"""
+    """(強い正規化名, 実際の表記の軽い正規化, 表示名, slug) を長い順に。
+    別名も同じ slug の項目として入れる(表示名は正式名のまま)。"""
     idx = []
     for i in idols:
         name = (i.get("name") or "").strip()
         slug = i.get("idol_slug") or i.get("slug")
-        key = ticketdive._norm_name(name)
-        if not name or not slug or len(key) < MIN_NAME_LEN:
+        if not name or not slug:
             continue
-        idx.append((key, _light(name), name, slug))
+        for written in [name, *(i.get("aliases") or [])]:
+            key = ticketdive._norm_name(written)
+            if len(key) >= MIN_NAME_LEN:
+                idx.append((key, _light(written), name, slug))
     idx.sort(key=lambda t: -len(t[0]))
     return idx
 
@@ -75,7 +78,7 @@ def names_in_text(text: str, idx) -> List[Tuple[str, str]]:
     plain = _URL_RE.sub(" ", text)  # URL の中の文字列は名前ではない
     lt = _light(plain)
     nt = ticketdive._norm_name(plain)
-    found, taken_l, taken_n = [], [], []
+    found, taken_l, taken_n, found_slugs = [], [], [], set()
     for key, lit, disp, slug in idx:
         sp = _light_spans(lt, lit)
         taken = taken_l
@@ -87,7 +90,10 @@ def names_in_text(text: str, idx) -> List[Tuple[str, str]]:
         if all(any(a <= s and e <= b for a, b in taken) for s, e in sp):
             continue
         taken.extend(sp)
-        found.append((disp, slug))
+        # 正式名と別名の両方が本文に出ても1組として数える
+        if slug not in found_slugs:
+            found_slugs.add(slug)
+            found.append((disp, slug))
     return found
 
 

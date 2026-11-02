@@ -879,6 +879,19 @@ def _detail_page_text(url: str) -> Optional[str]:
     return text
 
 
+def _detail_ticket_url(text: str) -> Optional[str]:
+    """詳細ページの本文から、チケットの販売ページを1つ選ぶ(先に書かれているもの)。
+
+    LivePocket のリンクが2種類以上あるページは、どれがその公演のものか決められない
+    ので LivePocket を候補から外す。t.livepocket.jp と livepocket.jp は同じページ。
+    """
+    urls = [m.group(0) for m in _DETAIL_TICKET_RE.finditer(text)]
+    livepocket_ids = {u.rsplit("/", 1)[-1] for u in urls if ticketsite.LIVEPOCKET_RE.match(u)}
+    if len(livepocket_ids) > 1:
+        urls = [u for u in urls if not ticketsite.LIVEPOCKET_RE.match(u)]
+    return urls[0] if urls else None
+
+
 def detail_lineup_text(row: dict, site_url: str) -> str:
     """公演の詳細ページの出演者欄(その公演日が書かれたページだけ)。無ければ空。"""
     url = row.get("tweet_url") or ""
@@ -915,9 +928,9 @@ def enrich_site_row_from_detail(row: dict, site_url: str) -> dict:
     if not text or (int(m.group(1)), int(m.group(2))) not in sites.dates_in_text(text):
         return row
     if not row.get("ticket_url"):
-        t = _DETAIL_TICKET_RE.search(text)
-        if t:
-            row["ticket_url"] = t.group(0)
+        ticket_url = _detail_ticket_url(text)
+        if ticket_url:
+            row["ticket_url"] = ticket_url
     if not row.get("open_time"):
         # 「10:40open 11:00start」は先に時刻が来る。開場の後ろの語から読むと開演(11:00)を拾う
         o = _OPEN_AFTER_RE.search(text) or None
@@ -2315,6 +2328,16 @@ def _match_dates(source: str, info: dict, name: str, today: str):
     return ([(info.get("event_datetime") or "")[:10]] if matched else []), False
 
 
+def _match_dates_any(source: str, info: dict, names, today: str):
+    """_match_dates を正式名と別名のそれぞれで見て、当たった日付をまとめて返す。"""
+    dates, multi_day = set(), False
+    for name in names:
+        days, multi = _match_dates(source, info, name, today)
+        dates.update(days)
+        multi_day = multi_day or multi
+    return sorted(dates), multi_day
+
+
 def _yrt_cache_key(source: str, url: str) -> str:
     return f"yrtu:{source}:{_event_key(source, url)}"
 
@@ -2458,7 +2481,8 @@ def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
     batch = []
     for idol in idols:
         name, slug = idol["name"], idol["idol_slug"]
-        dates, multi_day = _match_dates(source, info, name, today)
+        names = [name, *(idol.get("aliases") or [])]
+        dates, multi_day = _match_dates_any(source, info, names, today)
         for dt in dates:
             if not dt or dt < today:
                 continue  # 終了済みの公演は取り込まない

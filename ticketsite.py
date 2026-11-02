@@ -448,8 +448,12 @@ _LP_BADGE = re.compile(
     r"取扱(?:終了|開始前)|[¥￥（(].*)$")
 
 
-def _livepocket_ticket_types(lines):
-    """「前方チケット / 販売中 / ¥4,000」の並びから券種と価格を拾う。"""
+def _livepocket_ticket_types(lines, keep_free: bool = False):
+    """「前方チケット / 販売中 / ¥4,000」の並びから券種と価格を拾う。
+
+    ¥0 は価格の記載が無いものとして除く。ただし keep_free なら残す
+    (リリイベの購入整理券は ¥0 の券種そのものが販売情報なので)。
+    """
     out = []
     for i, ln in enumerate(lines):
         if not re.match(r"^[¥￥]\s*[\d,]+$", ln):
@@ -462,7 +466,7 @@ def _livepocket_ticket_types(lines):
             cand = lines[i - back]
             if _LP_BADGE.match(cand):
                 continue
-            if 1 <= len(cand) <= 40 and price.replace(",", "") != "0":
+            if 1 <= len(cand) <= 40 and (keep_free or price.replace(",", "") != "0"):
                 out.append({"name": cand, "price": f"{price}円"})
             break
     # 同じ券種が複数回出ることがあるので重複を除く
@@ -540,7 +544,7 @@ def fetch_event(url: str) -> Optional[dict]:
     if site == "livepocket":
         # JSON-LD に無い発売開始・券種は本文から取る
         sale = sale or _livepocket_sale(lines)
-        ticket_types = _livepocket_ticket_types(lines) or ticket_types
+        ticket_types = _livepocket_ticket_types(lines, keep_free="整理券" in (name or "")) or ticket_types
         if not sale:
             print(f"    LivePocket の販売受付期間が読めません({len(html)}字 /"
                   f" 受付期間の表記={'あり' if '受付期間' in html else 'なし'}): {url[:60]}")
