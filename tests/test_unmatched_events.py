@@ -82,7 +82,7 @@ def test_no_match_saves_one_sentinel_row(monkeypatch, fake_sb, capsys):
     assert row["event_name"] == "未登録だけの対バン"
     assert row["event_datetime"] == "2026-11-10 18:00"
     assert row["other_details"] == "渋谷テストホール"
-    assert row["raw_text"] == "未登録A / 未登録B / 他"
+    assert row["raw_text"] == "未登録A / 未登録B"
     assert row["ticket_url"] == LP_URL
     assert row["is_first_come"] is True
     assert touched == {"unmatched"}
@@ -113,6 +113,70 @@ def test_single_day_ticketdive_uses_artists(monkeypatch, fake_sb):
     assert len(written) == 1
     assert written[0]["tweet_id"] == "yrt:unmatched:fes-x:20261110"
     assert written[0]["raw_text"] == "未登録A / 未登録B"
+
+
+# --- raw_text の優先順位 ---
+
+DT = "2026-11-10"
+LONG_TEXT = "公演の説明" * 100
+
+
+def test_lineup_text_prefers_performers_over_long_act_text():
+    info = {"act_text": LONG_TEXT, "performers": ["未登録A", "未登録B"]}
+    assert worker._unmatched_lineup_text(info, DT) == "未登録A / 未登録B"
+
+
+def test_lineup_text_prefers_performers_over_short_act_text():
+    info = {"act_text": "短い自由文", "performers": ["未登録A"]}
+    assert worker._unmatched_lineup_text(info, DT) == "未登録A"
+
+
+def test_lineup_text_is_none_with_only_long_act_text():
+    info = {"act_text": LONG_TEXT, "performers": []}
+    assert worker._unmatched_lineup_text(info, DT) is None
+
+
+def test_lineup_text_uses_short_act_text_when_no_performers():
+    info = {"act_text": "未登録A ほか", "performers": []}
+    assert worker._unmatched_lineup_text(info, DT) == "未登録A ほか"
+
+
+@pytest.mark.parametrize("length, expected_used", [
+    (worker.LINEUP_TEXT_MAX, True),
+    (worker.LINEUP_TEXT_MAX + 1, False),
+])
+def test_lineup_text_max_is_inclusive(length, expected_used):
+    text = "あ" * length
+    expected = text if expected_used else None
+    assert worker._unmatched_lineup_text({"act_text": text}, DT) == expected
+
+
+def test_lineup_text_day_stages_win_over_everything():
+    info = {
+        "act_text": "短い自由文",
+        "performers": ["未登録A"],
+        "artists": ["初日のグループ"],
+        "day_stages": [
+            {"date": DT, "artists": ["その日のグループ", "その日のグループ", "別のグループ"]},
+            {"date": "2026-11-11", "artists": ["翌日のグループ"]},
+        ],
+    }
+    assert worker._unmatched_lineup_text(info, DT) == "その日のグループ / 別のグループ"
+
+
+def test_lineup_text_day_without_artists_does_not_borrow_other_fields():
+    info = {
+        "act_text": "短い自由文",
+        "performers": ["未登録A"],
+        "artists": ["初日のグループ"],
+        "day_stages": [{"date": "2026-11-11", "artists": ["翌日のグループ"]}],
+    }
+    assert worker._unmatched_lineup_text(info, DT) is None
+
+
+def test_lineup_text_uses_artists_without_day_stages():
+    info = {"artists": ["未登録A", "未登録B"], "day_stages": []}
+    assert worker._unmatched_lineup_text(info, DT) == "未登録A / 未登録B"
 
 
 # --- (b) 一致あり → 番兵行なし ---

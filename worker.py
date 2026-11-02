@@ -2146,24 +2146,28 @@ def _build_yrt_row(slug: str, source: str, url: str, info: dict, dt: str, multi_
 # 図鑑の登録グループが1組も出ない公演の行に入れる番兵の slug。
 # 行の形は通常の yrt 行と同じで、ID は yrt:unmatched:<イベント>:<日付> になる。
 UNMATCHED_SLUG = "unmatched"
+# 番兵行の raw_text に act_text をそのまま使ってよい長さの上限。
+# TiGET の act_text は出演欄が読めないと公演説明の全文になるので、長いものは使わない。
+LINEUP_TEXT_MAX = 200
 
 
 def _unmatched_lineup_text(info: dict, dt: str) -> Optional[str]:
     """番兵行の raw_text に入れる出演者テキスト。
 
-    LivePocket / TiGET は act_text か performers、TicketDive は日ごとの day_stages か
-    artists に出演者が入っている。
+    TicketDive は日ごとの day_stages か artists、LivePocket / TiGET は名前に整えた
+    performers を使う。act_text は performers が空のときに、短ければ使う。
     """
-    if info.get("act_text"):
-        return info["act_text"]
     day_stages = info.get("day_stages") or []
     if day_stages:
         # artists は初日のステージだけなので、別の日の行には使わない
-        names = list(dict.fromkeys(
-            a for d in day_stages if d.get("date") == dt for a in d.get("artists") or []))
-    else:
-        names = info.get("performers") or info.get("artists") or []
-    return " / ".join(names) or None
+        names = dict.fromkeys(
+            a for d in day_stages if d.get("date") == dt for a in d.get("artists") or [])
+        return " / ".join(names) or None
+    names = info.get("performers") or info.get("artists")
+    if names:
+        return " / ".join(names)
+    act_text = info.get("act_text")
+    return act_text if act_text and len(act_text) <= LINEUP_TEXT_MAX else None
 
 
 def _build_unmatched_rows(source: str, url: str, info: dict, today: str):
