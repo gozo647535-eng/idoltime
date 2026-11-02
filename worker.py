@@ -2115,7 +2115,8 @@ def _event_key(source: str, url: str) -> str:
     return f"{'lp' if source == 'livepocket' else 'tg'}-{seg}"
 
 
-def _build_yrt_row(slug: str, source: str, url: str, info: dict, dt: str, multi_day: bool) -> dict:
+def _build_yrt_row(slug: str, source: str, url: str, info: dict, dt: str, multi_day: bool,
+                   raw_text: Optional[str] = None) -> dict:
     # ツアーは日付ごとに会場が違うので、その日の会場を使う(無ければ代表会場)
     venue = info.get("venue")
     open_time = info.get("open_time")
@@ -2137,9 +2138,74 @@ def _build_yrt_row(slug: str, source: str, url: str, info: dict, dt: str, multi_
         "ticket_types": info.get("ticket_types") or [],
         "max_tickets": None,
         "other_details": clean_venue(venue),
-        "raw_text": None,
+        "raw_text": raw_text,
         "tweet_url": url,
     }
+
+
+# 図鑑の登録グループが1組も出ない公演の行に入れる番兵の slug。
+# 行の形は通常の yrt 行と同じで、ID は yrt:unmatched:<イベント>:<日付> になる。
+UNMATCHED_SLUG = "unmatched"
+
+
+def _unmatched_lineup_text(info: dict, dt: str) -> Optional[str]:
+    """番兵行の raw_text に入れる出演者テキスト。
+
+    LivePocket / TiGET は act_text か performers、TicketDive は日ごとの day_stages か
+    artists に出演者が入っている。
+    """
+    if info.get("act_text"):
+        return info["act_text"]
+    day_stages = info.get("day_stages") or []
+    if day_stages:
+        # artists は初日のステージだけなので、別の日の行には使わない
+        names = list(dict.fromkeys(
+            a for d in day_stages if d.get("date") == dt for a in d.get("artists") or []))
+    else:
+        names = info.get("performers") or info.get("artists") or []
+    return " / ".join(names) or None
+
+
+def _build_unmatched_rows(source: str, url: str, info: dict, today: str):
+    """登録グループが当たらなかった公演の番兵行を作る。
+
+    返り値は (行のリスト, 保存しない理由)。公演名・今日以降の公演日・会場が揃った
+    日だけを行にする(チケットサイトにはアイドル以外の催しや書きかけのページも
+    混ざるため)。複数日開催は _match_dates と同じく、今後の日付ごとに1行。
+    """
+    if not (info.get("event_name") or "").strip():
+        return [], "公演名なし"
+    day_dates = sorted({d["date"] for d in info.get("day_stages") or [] if d.get("date")})
+    multi_day = len(day_dates) > 1
+    if multi_day:
+        dates = day_dates
+    else:
+        normalized = normalize_event_datetime(info.get("event_datetime")) or ""
+        dates = [normalized[:10]] if re.match(r"\d{4}-\d{2}-\d{2}", normalized) else []
+    if not dates:
+        return [], "公演日なし"
+    upcoming = [dt for dt in dates if dt >= today]
+    if not upcoming:
+        return [], "公演日が過去"
+    rows = [
+        _build_yrt_row(UNMATCHED_SLUG, source, url, info, dt, multi_day,
+                       raw_text=_unmatched_lineup_text(info, dt))
+        for dt in upcoming
+    ]
+    rows = [r for r in rows if r["other_details"]]
+    return rows, (None if rows else "会場なし")
+
+
+def _drop_stale_unmatched_rows(source: str, url: str) -> None:
+    """登録グループが当たった公演に残っている番兵行を消す。
+
+    出演者の追加発表や図鑑への登録で、前は未登録だった公演に当たることがある。
+    """
+    prefix = f"yrt:{UNMATCHED_SLUG}:{_event_key(source, url)}:"
+    try:
+        sb.delete_auto_events(sb.get_auto_event_ids(UNMATCHED_SLUG, prefix=prefix))
+    except Exception as e:
+        print(f"  未登録公演の行の掃除でエラー: {e}")
 
 
 def _match_dates(source: str, info: dict, name: str, today: str):
@@ -2167,6 +2233,8 @@ def _yrt_cache_key(source: str, url: str) -> str:
 LIVEPOCKET_PAGES = int(os.environ.get("LIVEPOCKET_PAGES") or 3)
 # そのうち実際にイベントページを取りに行く上限
 LIVEPOCKET_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_FETCH_LIMIT") or 25)
+# 一覧で登録グループが当たらなかったイベントのページを取りに行く上限(上とは別枠)
+LIVEPOCKET_UNMATCHED_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_UNMATCHED_FETCH_LIMIT") or 20)
 
 # 1回の巡回で読み直す、取り込み済みイベントページの上限
 YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT") or 60)
@@ -2276,6 +2344,7 @@ def _add_calendar_ticket_urls(by_site: dict) -> int:
 
 def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
     """チケットページ1件を読み、出演する登録グループぶんの行を書く。
+    登録グループの行が1件も無ければ、条件を満たす公演に限って番兵行を書く。
 
     返り値 (書いた行数, 当日取得済みでスキップしたか)。
     同じイベントは何度も出回るので、当日すでに取り込んだURLは再取得しない
@@ -2305,13 +2374,25 @@ def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
             batch.append(_build_yrt_row(slug, source, url, info, dt, multi_day))
             touched.add(slug)
             print(f"  → [{source}] {name}: {info.get('event_name')} ({dt})")
+    matched = bool(batch)
+    if not matched:
+        batch, reason = _build_unmatched_rows(source, url, info, today)
+        for row in batch:
+            touched.add(UNMATCHED_SLUG)
+            print(f"  → [{source}] 未登録公演として保存: {row['event_name']} "
+                  f"({(row['event_datetime'] or '')[:10]})")
+        if reason:
+            print(f"  → [{source}] 未登録公演を保存せず({reason}): "
+                  f"{info.get('event_name') or url}")
     # フェス1本で100組を超えることがあるので、1行ずつではなくまとめて書く
     try:
         sb.upsert_auto_events(batch)
-        return len(batch), False
     except Exception as e:
         print(f"  書き込み失敗({len(batch)}件): {e}")
         return 0, False
+    if matched:
+        _drop_stale_unmatched_rows(source, url)
+    return len(batch), False
 
 
 def run_livepocket() -> int:
@@ -2321,7 +2402,8 @@ def run_livepocket() -> int:
     投稿が発売直前のイベントは間に合わない。一覧を直接見れば公開された時点で拾える。
 
     一覧に「販売前/販売中」の表示と出演者が載っているため、登録グループが出る
-    ものだけに絞ってからイベントページを取りに行く(無駄な取得をしない)。
+    ものを先に取りに行く。当たらなかったものも、未登録公演として残すために
+    別枠(LIVEPOCKET_UNMATCHED_FETCH_LIMIT)の上限まで取りに行く。
 
     販売中も対象にするのは、ライポケは公開から発売までが短く、公開と同時に
     発売が始まるものも多いため(新着60件のうち22件がすでに販売中だった,
@@ -2355,19 +2437,28 @@ def run_livepocket() -> int:
     # 一覧の出演者欄で登録グループに当たるものだけを対象にする。
     # 取りに行く上限があるので、間に合わせたい販売前を先に並べる。
     targets = []
+    unmatched = []
     for c in pre + on_sale:
         text = f"{c['name']}\n{' / '.join(c['performers'])}"
         if lineup.names_in_text(text, lineup_idx):
             targets.append(c)
+        else:
+            unmatched.append(c)
     print(f"LivePocket 新着一覧: {len(cards)} 件 / 販売前 {len(pre)} 件・販売中 {len(on_sale)} 件 / "
-          f"登録グループが出る {len(targets)} 件")
+          f"登録グループが出る {len(targets)} 件 / 出ない {len(unmatched)} 件")
     total = 0
     touched = set()
     for c in targets[:LIVEPOCKET_FETCH_LIMIT]:
         added, _ = _ingest_sale_url("livepocket", c["url"], idols, today, touched)
         total += added
+    unmatched_fetched = 0
+    for c in unmatched[:LIVEPOCKET_UNMATCHED_FETCH_LIMIT]:
+        added, was_skipped = _ingest_sale_url("livepocket", c["url"], idols, today, touched)
+        total += added
+        unmatched_fetched += 0 if was_skipped else 1
     removed = sum(_cleanup_past_yrt(slug, today) for slug in touched)
-    print(f"LivePocket 取り込み完了: 合計 {total} 件 / 過去分 {removed} 件削除")
+    print(f"LivePocket 取り込み完了: 合計 {total} 件 / 未一致分の取得 {unmatched_fetched} 件 / "
+          f"過去分 {removed} 件削除")
     return total
 
 
