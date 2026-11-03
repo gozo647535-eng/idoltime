@@ -37,6 +37,7 @@ import venuetext  # TimeTree 公開カレンダーからの取得エンジン
 import ticketdive  # TicketDive イベントページの構造化パーサ(チケット情報の高精度化)
 import ticketsite  # LivePocket / TiGET イベントページの構造化パーサ
 import release  # 店舗のリリースイベント(タワレコ/HMV/ヴィレヴァン)
+import venues  # 会場の公式スケジュール(レジストリ・取得・抽出)
 import yahoo_rt  # Yahoo!リアルタイム検索からのチケットサイト・イベント発見
 from watchlist import (
     build_idol_name_list,
@@ -3337,6 +3338,253 @@ def cleanup_orphan_rows() -> int:
     return len(doomed)
 
 
+# --- 会場スケジュールの収集(Phase 1: 試運転。DB には書かない) ---
+
+_VENUE_CANCELLED = re.compile(r"中止|延期|休館|貸切|メンテナンス")
+_VENUE_NON_IDOL = re.compile(r"演劇|劇団|落語|寄席|漫才|お笑い|バスケ|プロレス|吹奏楽|講演会")
+_VENUE_IDOL_WORD = re.compile(r"地下アイドル|アイドル|(?<![a-z0-9])idols?(?![a-z0-9])|特典会|チェキ", re.IGNORECASE)
+# 英字だけの短い名前は同名のバンドなどと紛らわしい(設計書 §5 の最も重い誤判定)
+_VENUE_SHORT_NAME_LEN = 6
+_VENUE_KEY_RE = re.compile(r"^ven:.+:[a-z0-9-]+:[^:\s/]+:\d{8}$")
+
+
+def _venue_word_in(words, text: str) -> Optional[str]:
+    hay = unicodedata.normalize("NFKC", text or "").casefold()
+    for w in words or []:
+        if w and unicodedata.normalize("NFKC", w).casefold() in hay:
+            return w
+    return None
+
+
+def _is_short_ascii_name(written: str) -> bool:
+    return written.isascii() and len(ticketdive._norm_name(written)) <= _VENUE_SHORT_NAME_LEN
+
+
+def judge_venue_event(ev: dict, venue: dict, lineup_idx, today: str) -> dict:
+    """会場の公演がアイドル公演かを判定する(設計書 §5 の順序)。
+
+    返り値は {"result": accept|hold|reject, "reason": 根拠, "slugs": 図鑑のグループ}。
+    """
+    def verdict(result, reason, slugs=None):
+        return {"result": result, "reason": reason, "slugs": slugs or []}
+
+    title = (ev.get("title") or "").strip()
+    artist = ev.get("artist") or ""
+    body = ev.get("body") or ""
+    filters = venue.get("filter") or {}
+    # 0: 基本ゲート
+    if not title:
+        return verdict("reject", "公演名なし")
+    if not ev.get("date"):
+        return verdict("reject", "公演日なし")
+    if ev["date"] < today:
+        return verdict("reject", "公演日が過去")
+    if _GENERIC_HEADING.match(title):
+        return verdict("reject", "ページ見出し")
+    if _RECEPTION_ONLY.search(title) and not _REAL_GATHERING.search(title):
+        return verdict("reject", "チケット受付")
+    if sites._is_media_title(title):
+        return verdict("reject", "放送・配信など")
+    # 1: 中止など。本文の「雨天中止の場合は」のような注記で落とさないよう、一覧の項目までを見る
+    cancelled = _VENUE_CANCELLED.search(unicodedata.normalize(
+        "NFKC", f"{title}\n{ev.get('item_text') or ''}"))
+    if cancelled:
+        return verdict("reject", f"中止など: {cancelled.group(0)}")
+    # 2: 会場ごとの拒否
+    denied = _venue_word_in(filters.get("deny_titles"), title)
+    if denied:
+        return verdict("reject", f"会場の拒否語: {denied}")
+    # 3: 図鑑に一致。短い英字名は出演者欄で当たった場合だけ信じる
+    strong_idx = [e for e in lineup_idx if not _is_short_ascii_name(e[1])]
+    other_text = f"{title}\n{body}"
+    strong = dict((slug, disp) for disp, slug in lineup.names_in_text(artist, lineup_idx))
+    for disp, slug in lineup.names_in_text(other_text, strong_idx):
+        strong.setdefault(slug, disp)
+    if strong:
+        return verdict("accept", "図鑑に一致: " + " / ".join(strong.values()), list(strong))
+    weak = [disp for disp, _ in lineup.names_in_text(other_text, lineup_idx)]
+    if weak:
+        return verdict("hold", "短い英字名が出演者欄の外でのみ一致: " + " / ".join(weak))
+    # 4: 会場ごとの許可
+    allowed = _venue_word_in(filters.get("allow_titles"), title)
+    if allowed:
+        return verdict("accept", f"会場の許可語: {allowed}")
+    # 5: 全体の拒否語。本文はそのジャンルの説明とは限らないので見ない
+    non_idol = _VENUE_NON_IDOL.search(unicodedata.normalize("NFKC", f"{title}\n{artist}"))
+    if non_idol:
+        return verdict("reject", f"拒否語: {non_idol.group(0)}")
+    # 6: アイドルを示す語
+    idol_word = _VENUE_IDOL_WORD.search(unicodedata.normalize("NFKC", f"{title}\n{artist}\n{body}"))
+    if idol_word:
+        return verdict("accept", f"アイドル語: {idol_word.group(0)}")
+    # 7: それ以外は公開しない
+    return verdict("hold", "判定材料なし")
+
+
+def venue_base_key(venue_id: str, ev: dict) -> str:
+    """公演のキー。詳細ページの安定IDがあればそれ、無ければ会場・公演名・日付のハッシュ。"""
+    if ev.get("ext_id"):
+        return str(ev["ext_id"])
+    src = f"{venue_id}|{_id_name(ev.get('title'))}|{ev.get('date') or ''}"
+    return hashlib.sha1(src.encode("utf-8")).hexdigest()[:12]
+
+
+def assign_venue_keys(venue_id: str, events: List[dict]) -> None:
+    """各公演に ev["key"] を入れる。同じキーで同じ日の公演(昼夜など)にだけ開演時刻を足す。
+
+    中止で reject になった回があっても残りのキーが変わらないよう、判定前の全件で見る。
+    """
+    starts = {}
+    for ev in events:
+        ev["key"] = venue_base_key(venue_id, ev)
+        starts.setdefault((ev["key"], ev.get("date")), set()).add(ev.get("start"))
+    for ev in events:
+        if ev.get("start") and len(starts[(ev["key"], ev.get("date"))]) > 1:
+            ev["key"] = f"{ev['key']}-{ev['start'].replace(':', '')}"
+
+
+def venue_row_id(slug: str, venue_id: str, key: str, date: str) -> str:
+    """Phase 2 で tweet_id に使う予定のキー。"""
+    return f"ven:{slug}:{venue_id}:{key}:{date.replace('-', '')}"
+
+
+def venue_key_problems(keys: List[str]) -> List[str]:
+    """キーの重複と形式の問題。Phase 2 で一括 upsert が落ちる原因を試運転で見つける。"""
+    problems, seen = [], set()
+    for k in keys:
+        if k in seen:
+            problems.append(f"キーが重複: {k}")
+        seen.add(k)
+        if not _VENUE_KEY_RE.match(k):
+            problems.append(f"キーの形式が不正: {k}")
+    return problems
+
+
+def judge_venue_events(venue: dict, events: List[dict], warnings: List[str],
+                       lineup_idx, today: str) -> dict:
+    """抽出結果を判定し、会場1件の試運転レポートにまとめる。"""
+    assign_venue_keys(venue["id"], events)
+    accept, hold, reject_reasons, keys = [], [], {}, []
+    for ev in events:
+        v = judge_venue_event(ev, venue, lineup_idx, today)
+        if v["result"] == "reject":
+            label = v["reason"].split(":")[0]
+            reject_reasons[label] = reject_reasons.get(label, 0) + 1
+            continue
+        row_keys = [venue_row_id(s, venue["id"], ev["key"], ev["date"])
+                    for s in (v["slugs"] or [UNMATCHED_SLUG])]
+        keys.extend(row_keys)
+        entry = {"date": ev["date"], "start": ev.get("start"), "title": ev["title"],
+                 "reason": v["reason"], "keys": row_keys, "link": ev.get("link")}
+        (accept if v["result"] == "accept" else hold).append(entry)
+    order = lambda e: (e["date"], e["start"] or "")
+    return {
+        "id": venue["id"], "name": venue["name"], "status": venue["status"],
+        "fetched": len(events),
+        "accept": sorted(accept, key=order),
+        "hold": sorted(hold, key=order),
+        "reject": sum(reject_reasons.values()),
+        "reject_reasons": reject_reasons,
+        "warnings": list(warnings) + venue_key_problems(keys),
+    }
+
+
+def _venue_entry_lines(entries: List[dict]) -> List[str]:
+    return [
+        f"{e['date']}{' ' + e['start'] if e['start'] else ''} | {e['title'][:60]} | {e['reason']} | "
+        + ", ".join(e["keys"])
+        for e in entries
+    ]
+
+
+def _print_venue_report(r: dict) -> None:
+    print(f"会場 {r['id']}({r['status']}): 取得 {r['fetched']} / accept {len(r['accept'])} / "
+          f"hold {len(r['hold'])} / reject {r['reject']}")
+    for w in r["warnings"]:
+        print(f"  ⚠ {r['id']}: {w}")
+    if r["reject_reasons"]:
+        print("  reject の内訳: " + ", ".join(f"{k} {n}" for k, n in r["reject_reasons"].items()))
+    for label, key in (("accept", "accept"), ("hold", "hold")):
+        for line in _venue_entry_lines(r[key]):
+            print(f"  [{label}] {line}")
+
+
+def _venue_md(s) -> str:
+    return str(s or "").replace("|", "\\|").replace("\n", " ")
+
+
+def venue_summary_markdown(reports: List[dict]) -> str:
+    lines = ["## 会場スケジュール(試運転・DB書き込みなし)", "",
+             "| 会場 | 取得(フィルタ前) | accept | hold | reject | 状態 |",
+             "|---|---:|---:|---:|---:|---|"]
+    for r in reports:
+        state = "⚠ " + " / ".join(_venue_md(w) for w in r["warnings"]) if r["warnings"] else "OK"
+        lines.append(f"| {_venue_md(r['name'])} (`{r['id']}`) | {r['fetched']} | {len(r['accept'])} | "
+                     f"{len(r['hold'])} | {r['reject']} | {state} |")
+    for r in reports:
+        for label, key in (("accept", "accept"), ("hold", "hold")):
+            if not r[key]:
+                continue
+            lines += ["", f"### {_venue_md(r['name'])}: {label}", "",
+                      "| 日付 | 公演名 | 判定根拠 | キー |", "|---|---|---|---|"]
+            for e in r[key]:
+                when = e["date"] + (f" {e['start']}" if e["start"] else "")
+                keys = "<br>".join(f"`{_venue_md(k)}`" for k in e["keys"])
+                lines.append(f"| {when} | {_venue_md(e['title'][:60])} | {_venue_md(e['reason'])} | {keys} |")
+    return "\n".join(lines) + "\n"
+
+
+def _write_venue_summary(reports: List[dict]) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(venue_summary_markdown(reports))
+    except OSError as e:
+        print(f"⚠ ステップサマリーを書けませんでした: {e}")
+
+
+def run_venues() -> List[dict]:
+    """会場の公式スケジュールを読み、判定結果をログとサマリーに出す。
+
+    Phase 1 は試運転なので DB には一切書かない(worker_state も含む)。
+    status=live があっても、書き込みの経路が Phase 2 まで存在しないのでログのみになる。
+    """
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    only = [s for s in os.environ.get("VENUE_IDS", "").split(",") if s.strip()]
+    targets = venues.select_targets(venues.load_registry(), only)
+    if not targets:
+        print("会場スケジュール: 対象の会場がありません")
+        return []
+    lineup_idx = lineup.build_index(build_idol_name_list())
+    if not lineup_idx:
+        print("⚠ 図鑑を読めなかったので、図鑑との照合なしで判定します(hold が増えます)")
+    fetcher = venues.Fetcher()
+    reports = []
+    for venue in targets:
+        print(f"会場スケジュール: {venue['id']} ({venue['name']})")
+        try:
+            events, warnings = venues.collect_venue(venue, fetcher, today)
+            report = judge_venue_events(venue, events, warnings, lineup_idx, today)
+        except Exception as e:
+            traceback.print_exc()
+            report = judge_venue_events(venue, [], [f"処理中のエラー: {e}"], lineup_idx, today)
+        _print_venue_report(report)
+        reports.append(report)
+    _write_venue_summary(reports)
+    return reports
+
+
+def _run_venues_guarded() -> None:
+    """フル巡回の先頭用。失敗しても後続の収集を止めない。"""
+    try:
+        run_venues()
+    except Exception as e:
+        traceback.print_exc()
+        print(f"⚠ 会場スケジュールの収集に失敗しました(後続は続行): {e}")
+
+
 def main() -> int:
     # X_ONLY=true は twikit(X取り込み)の動作確認用。サイト巡回/TimeTreeを飛ばしXだけ実行する。
     x_only = os.environ.get("X_ONLY", "").lower() == "true"
@@ -3377,6 +3625,10 @@ def main() -> int:
         # 待たずに手動実行で反映できるように(数秒で終わる)
         run_curated()
         return 0
+    # 会場スケジュールだけを読む確認用(数分)。VENUE_IDS で会場を絞れる。
+    if os.environ.get("VENUE_ONLY", "").lower() == "true":
+        run_venues()
+        return 0
     if os.environ.get("GCAL_ONLY", "").lower() == "true":
         run_gcal()
         return 0
@@ -3402,6 +3654,7 @@ def main() -> int:
         ticketsite.listing_check([u.strip() for u in extra.split(",") if u.strip()] or None)
         return 0
     if not x_only:
+        _run_venues_guarded()
         run_sites()
         run_timetree()
         run_gcal()
