@@ -67,6 +67,28 @@ def looks_placeholder(title: str) -> bool:
     return bool(_PLACEHOLDER_RE.match(norm) or _TABI_RE.match(norm))
 
 
+# 公演が「無い」ことの告知(例: ライブなし / 出演予定なし / 本日ライブはありません)。
+# タイトル全体がこの形のときだけ一致させる。「涙なしには語れない夜」のような本物の
+# 公演を消さないため、部分一致にはしない。
+# 「は」は前に語があるときだけ認める(「はなし」は「話」と読めるので告知扱いしない)。
+_NO_EVENT_RE = re.compile(
+    r"^(?:本日は|本日|今日は)?"
+    r"(?:(?:ライブ|出演|イベント|公演|配信|特典会)の?)?"
+    r"(?:予定)?"
+    r"(?:(?<=[^は])は)?"
+    r"(?:なし|ありません)$"
+)
+
+
+def is_no_event_title(title: str) -> bool:
+    """タイトル全体が「公演が無いことの告知」なら True。カレンダー取り込みと既存行の掃除で共用。"""
+    t = _core_name(unicodedata.normalize("NFKC", title or ""))
+    # 空白・句読点・括弧と、不可視の制御文字を落として比べる
+    t = "".join(c for c in t if unicodedata.category(c)[0] not in "ZP"
+                and unicodedata.category(c) not in ("Cc", "Cf"))
+    return bool(_NO_EVENT_RE.match(t))
+
+
 def _title_from_note(note: str):
     m = _QUOTED_RE.search(note or "")
     return m.group(1).strip() if m else None
@@ -313,9 +335,10 @@ def extract_note_ticket(gemini_client, title: str, note: str, today: str):
     return g_sale, (is_fc or g_fc)
 
 
-def fetch_public_events(alias: str):
+def fetch_public_events(alias: str, skipped: Optional[list] = None):
     """公開カレンダーのイベントを取得。(content_hash, [dict]) を返す。失敗時 (None, [])。
-    dict は upcoming のみ・整形済み: id/title/event_datetime/venue/ticket_url/note/page_url。"""
+    dict は upcoming のみ・整形済み: id/title/event_datetime/venue/ticket_url/note/page_url。
+    「公演が無いことの告知」は返さず、そのタイトルを skipped(渡されたとき)に積む。"""
     url = f"https://timetreeapp.com/api/v2/public_calendars/{alias}/public_events"
     data = _get(url)
     if not data:
@@ -338,6 +361,10 @@ def fetch_public_events(alias: str):
             continue
         raw_title = (ev.get("title") or "").strip()
         if not raw_title:
+            continue
+        if is_no_event_title(raw_title):
+            if skipped is not None:
+                skipped.append(raw_title)
             continue
         note = ev.get("note") or ""
         ticket_url = _ticket_url_from_note(note) or (ev.get("link_url") or "").strip() or None
