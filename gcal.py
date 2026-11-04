@@ -120,10 +120,11 @@ def _parse_dt(value: str, params: str):
     return day, f"{hh}:{mi}"
 
 
-def fetch_public_events(cal_id: str):
+def fetch_public_events(cal_id: str, skipped=None):
     """公開カレンダーの今後のイベントを (content_hash, [dict]) で返す。
 
     dict は TimeTree と同じ形: id/title/event_datetime/venue/ticket_url/note/page_url。
+    「公演が無いことの告知」は返さず、そのタイトルを skipped(渡されたとき)に積む。
     """
     text = _get(ics_url(cal_id))
     if not text or "BEGIN:VCALENDAR" not in text:
@@ -142,7 +143,7 @@ def fetch_public_events(cal_id: str):
             continue
         if line == "END:VEVENT":
             if cur is not None:
-                ev = _build(cur, cal_id, today)
+                ev = _build(cur, cal_id, today, skipped)
                 if ev:
                     events.append(ev)
             cur = None
@@ -157,7 +158,7 @@ def fetch_public_events(cal_id: str):
     return content_hash, events
 
 
-def _build(fields: dict, cal_id: str, today):
+def _build(fields: dict, cal_id: str, today, skipped=None):
     if (fields.get("STATUS") or ("", ""))[0].upper() == "CANCELLED":
         return None
     raw_title = _unescape((fields.get("SUMMARY") or ("", ""))[0]).strip()
@@ -176,6 +177,10 @@ def _build(fields: dict, cal_id: str, today):
     # 残したまま _core_name に渡すと「Live]AYNs」のように括弧だけが残る。
     stripped = re.sub(r"^\s*(?:[\[【(（][^\]】)）]{0,12}[\]】)）]\s*)+", "", raw_title)
     stripped = re.sub(r"\s+", " ", stripped).strip()
+    if timetree.is_no_event_title(stripped or raw_title):
+        if skipped is not None:
+            skipped.append(raw_title)
+        return None
     title = timetree._core_name(stripped) or stripped or raw_title
     ticket_url = timetree._ticket_url_from_note(note) or link
     # 「予定」「遠征予定」のような実体名の無い行は、メモの引用名で補えなければ

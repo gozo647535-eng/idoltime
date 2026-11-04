@@ -16,6 +16,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 import asyncio
+import collections
 import datetime
 import hashlib
 import json
@@ -984,6 +985,32 @@ def build_gcal_row(slug: str, name: str, gc_url: str, ev: dict) -> Optional[dict
     }
 
 
+def _titles_with_counts(titles) -> str:
+    """タイトルの並びを「出演なし」×10 の形にまとめる(同じ告知が日数分並ぶため)。"""
+    return " / ".join(f"「{t}」×{n}" for t, n in collections.Counter(titles).most_common())
+
+
+def _note_no_event_skips(name: str, skipped: list, collected: list) -> None:
+    """1カレンダーで弾いた「公演なし」の告知をログに出し、巡回全体の集計に足す。"""
+    if skipped:
+        print(f"  公演なしの告知を除外: {len(skipped)} 件 {_titles_with_counts(skipped)}")
+        collected.extend((name, t) for t in skipped)
+
+
+def _report_no_event_skips(label: str, collected: list) -> None:
+    """巡回全体で弾いた「公演なし」の告知を、ログとステップサマリーにまとめて出す。"""
+    if not collected:
+        return
+    print(f"{label}: 公演なしの告知を除外 合計 {len(collected)} 件")
+    lines = [f"\n### {label}: 公演なしの告知を除外 {len(collected)} 件\n\n"]
+    by_group = {}
+    for name, title in collected:
+        by_group.setdefault(name, []).append(title)
+    for name, titles in by_group.items():
+        lines.append(f"- {name}: {_titles_with_counts(titles)}\n")
+    _append_step_summary("".join(lines))
+
+
 def run_gcal() -> int:
     """Google 公開カレンダー(ICS)を巡回してイベントを取り込む。
 
@@ -1001,6 +1028,7 @@ def run_gcal() -> int:
     fanout = 0
     fanout_slugs = set()
     gc_shrunk = []   # 反映より削除が多かったグループ(退行の早期発見用)
+    no_event = []    # 弾いた「公演なし」の告知 [(グループ名, タイトル)]
     for entry in watch:
         slug, name, gc_url = entry["idol_slug"], entry["name"], entry["gc_url"]
         cal_id = gcal.extract_calendar_id(gc_url)
@@ -1008,11 +1036,13 @@ def run_gcal() -> int:
             print(f"{name}: カレンダーIDを取れません({gc_url[:60]})")
             continue
         print(f"{name} のGoogleカレンダーを確認: {cal_id[:48]}")
+        skipped = []
         try:
-            content_hash, events = gcal.fetch_public_events(cal_id)
+            content_hash, events = gcal.fetch_public_events(cal_id, skipped=skipped)
         except Exception as e:
             print(f"  失敗: {e}")
             continue
+        _note_no_event_skips(name, skipped, no_event)
         if content_hash is None:
             continue
         state_key = f"gc:{cal_id}"
@@ -1053,6 +1083,7 @@ def run_gcal() -> int:
     if gc_shrunk:
         print("⚠ 反映より削除が多かったグループ: "
               + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in gc_shrunk))
+    _report_no_event_skips("Googleカレンダー", no_event)
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"Googleカレンダー取り込み完了: 合計 {total} 件 / "
           f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
@@ -1909,6 +1940,7 @@ def run_timetree() -> int:
     fanout = 0
     fanout_slugs = set()
     tt_shrunk = []   # 反映より削除が多かったグループ(退行の早期発見用)
+    no_event = []    # 弾いた「公演なし」の告知 [(グループ名, タイトル)]
     for entry in watch:
         slug, name, tt_url = entry["idol_slug"], entry["name"], entry["tt_url"]
         alias = timetree.extract_alias(tt_url)
@@ -1916,11 +1948,13 @@ def run_timetree() -> int:
             print(f"{name}: TimeTree alias を解決できません({tt_url})")
             continue
         print(f"{name} の TimeTree を確認: {alias}")
+        skipped = []
         try:
-            content_hash, events = timetree.fetch_public_events(alias)
+            content_hash, events = timetree.fetch_public_events(alias, skipped=skipped)
         except Exception as e:
             print(f"  失敗: {e}")
             continue
+        _note_no_event_skips(name, skipped, no_event)
         if content_hash is None:
             continue
         state_key = f"tt:{alias}"
@@ -1966,6 +2000,7 @@ def run_timetree() -> int:
     if tt_shrunk:
         print("⚠ 反映より削除が多かったグループ: "
               + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in tt_shrunk))
+    _report_no_event_skips("TimeTree", no_event)
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"TimeTree 取り込み完了: 合計 {total} 件 / "
           f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
@@ -3253,6 +3288,38 @@ def fix_ticket_urls() -> int:
     return fixed
 
 
+def cleanup_no_event_rows() -> int:
+    """既に保存された「公演なし」の告知の行(tt: / gc:)を消す。
+
+    カレンダーの再突合は内容が変わったときしか走らず(変更なしはスキップ)、
+    TimeTree は順番待ちもあるので、取り込みで弾くだけでは既存行が残り続ける。
+    図鑑の状態に関係なく消せるので、孤児の判定の歯止めとは独立に動かす。
+    """
+    doomed, titles = [], []
+    for prefix in ("tt:", "gc:"):
+        try:
+            rows = sb.get_auto_event_rows_by_prefix(prefix)
+        except Exception as e:
+            print(f"公演なしの告知の掃除({prefix}): 読み込みに失敗: {e}")
+            continue
+        for r in rows:
+            tid, title = r.get("tweet_id") or "", r.get("event_name") or ""
+            if tid.startswith(prefix) and timetree.is_no_event_title(title):
+                doomed.append(tid)
+                titles.append(title)
+    if not doomed:
+        return 0
+    try:
+        sb.delete_auto_events(doomed)
+    except Exception as e:
+        print(f"公演なしの告知の掃除: 削除に失敗: {e}")
+        return 0
+    detail = _titles_with_counts(titles)
+    print(f"公演なしの告知の掃除: {len(doomed)} 件削除 {detail}")
+    _append_step_summary(f"\n### 公演なしの告知の掃除: {len(doomed)} 件削除\n\n{detail}\n")
+    return len(doomed)
+
+
 def cleanup_orphan_rows() -> int:
     """図鑑からリンクを外したグループの行を掃除する。
 
@@ -3264,6 +3331,7 @@ def cleanup_orphan_rows() -> int:
 
     ttx(対バンの相互反映)も、元のカレンダーが無くなったなら消す。
     """
+    cleanup_no_event_rows()
     try:
         tt_slugs = {e["idol_slug"] for e in build_timetree_watch_list()}
         gc_slugs = {e["idol_slug"] for e in build_gcal_watch_list()}
@@ -3534,15 +3602,19 @@ def venue_summary_markdown(reports: List[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _write_venue_summary(reports: List[dict]) -> None:
+def _append_step_summary(text: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
         return
     try:
         with open(path, "a", encoding="utf-8") as f:
-            f.write(venue_summary_markdown(reports))
+            f.write(text)
     except OSError as e:
         print(f"⚠ ステップサマリーを書けませんでした: {e}")
+
+
+def _write_venue_summary(reports: List[dict]) -> None:
+    _append_step_summary(venue_summary_markdown(reports))
 
 
 def run_venues() -> List[dict]:
