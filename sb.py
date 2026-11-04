@@ -371,6 +371,37 @@ def get_future_text_rows(prefix: str, today: str):
     return out
 
 
+def get_upcoming_rows_for_placeholder(today: str):
+    """仮タイトルの照合に使う、表示中の今後の行を全件返す(読み取りのみ)。
+
+    人が隠した行は仮タイトルの対象にも候補にも使わないので読まない。
+    stage_time は列が無い環境があるので、あるときだけ読む。
+    """
+    _drop_missing_columns([])  # 列の有無を調べるだけ(読み取りのみ)
+    columns = "tweet_id,idol_slug,event_name,event_datetime,open_time,other_details,ticket_url,raw_text"
+    if "stage_time" in (_available_columns or ()):
+        columns += ",stage_time"
+    out = []
+    for offset in range(0, 100000, 1000):
+        _, rows = _request(
+            "GET",
+            "auto_events",
+            params={
+                "select": columns,
+                "hidden": "eq.false",
+                "event_datetime": f"gte.{today}",
+                "order": "tweet_id",
+                "limit": 1000,
+                "offset": offset,
+            },
+        )
+        rows = rows or []
+        out.extend(rows)
+        if len(rows) < 1000:
+            break
+    return out
+
+
 def delete_auto_events(tweet_ids):
     """tweet_id を指定して auto_events を一括削除(件数分の往復を避ける)。"""
     ids = [t for t in tweet_ids if t]

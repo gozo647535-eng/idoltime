@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 import ticketdive  # 名前の正規化(装飾記号を落とす)を共用する
+import venuetext  # メモの HTML を行へ戻す処理を共用する
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 # Web クライアントが送る固定ヘッダ。値は "web/<ver>/<locale>" 形式であれば良い。
@@ -32,7 +33,8 @@ JST = datetime.timezone(datetime.timedelta(hours=9))
 # メモ抽出ロジックを変えたらこの値を上げる(既読カレンダーの再処理をトリガー)
 # v3: TicketDive 構造化データによる補完を追加
 # v5: メモから開場/入場時刻(open_time/entry_time)を抽出
-EXTRACT_VERSION = "v7"  # 発売の締切(「〜まで」)を開始と読んでいたのを直したので再取り込み
+# v7: 発売の締切(「〜まで」)を開始と読んでいたのを直した
+EXTRACT_VERSION = "v8"  # メモの題名の読み方を厳格化し、仮タイトルにも広げたので再取り込み
 
 # チケット関連のメモか判定するキーワード
 _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", "販売", "先着")
@@ -99,9 +101,141 @@ def is_no_event_title(title: str) -> bool:
     return bool(_NO_EVENT_RE.match(t))
 
 
+# --- 仮タイトル(予定があることだけを伝える題) ---
+# NFKC と _core_name の後の文字列に当てる。タイトル全体で判定する。
+# 保存済みの古い行は半角の閉じ括弧が欠けている(「ライブ予定(仮」)ので、")" は無くてもよい。
+# 場所に括弧を許さない: 「ライブ予定@渋谷(昼)」は付随情報だけとは言い切れないので仮扱いしない。
+_TENTATIVE_RE = re.compile(
+    r"^(?P<kind>live|ライブ|イベント|出演|主催)予定"
+    r"(?:\((?P<m1>仮|未定|調整中)\)?)?"
+    r"(?:\s*[@📍📌]️?\s*(?P<place>[^@📍📌「」『』()]{1,30}?))?"
+    r"\s*(?:\((?P<m2>仮|未定|調整中)\)?)?$",
+    re.IGNORECASE,
+)
+# 場所の欄に公演名が書かれている形(「出演予定@アイドル道場 Vol.71」)は実名入りの題として扱う
+_TENTATIVE_NAMEISH_PLACE = re.compile(
+    r"vol|第\s*\d+\s*回|fes|フェス|祭|公演|ツアー|tour|presents|生誕|定期|ワンマン|対バン|http|"
+    r"\d{1,2}\s*[/月]\s*\d{1,2}|20\d\d",
+    re.IGNORECASE,
+)
+
+
+def parse_tentative_title(title: str) -> Optional[dict]:
+    """予定があることだけを伝える題なら {kind, place, marked} を返す。違えば None。
+
+    looks_placeholder(手掛かりが無ければ取り込まない、の判定)とは別の問いで、
+    これ自体は行を消す根拠にしない。「ライブ予定@渋谷VIDENT」は実在の予定として残す。
+    """
+    if not title or is_no_event_title(title):
+        return None
+    m = _TENTATIVE_RE.match(_core_name(unicodedata.normalize("NFKC", title)))
+    if not m:
+        return None
+    place = (m.group("place") or "").strip() or None
+    if place and _TENTATIVE_NAMEISH_PLACE.search(place):
+        return None
+    return {
+        "kind": m.group("kind").lower(),
+        "place": place,
+        "marked": bool(m.group("m1") or m.group("m2")),
+    }
+
+
 def _title_from_note(note: str):
+    """メモの最初の引用。厳格化前の読み方で、題名には note_title を使う。
+
+    公演の存在を示すメモかどうかの判定と、題名として採らなかった引用のログに残している。
+    """
     m = _QUOTED_RE.search(note or "")
     return m.group(1).strip() if m else None
+
+
+# 「イベント名: X」「【公演名】X」。区切りが無い「タイトル未定」は見出しではない
+_NOTE_LABEL_RE = re.compile(
+    r"^[^\w【\[]*(?:[【\[](?:イベント名|公演名|タイトル)[】\]]\s*[:：]?"
+    r"|(?:イベント名|公演名|タイトル)\s*[:：])\s*(\S.*)$"
+)
+_NOTE_QUOTE_RE = re.compile(r"[「『]([^」』\n]*)[」』]")
+# 題名にしない語。設計の語に、券種・物販の引用でよく出るものを足してある
+_NOTE_BAD_WORDS = ("チケット", "先行", "一般", "発売", "物販", "特典", "入場", "注意", "整理番号",
+                   "券", "チェキ", "グッズ", "ドリンク", "http")
+# 引用の直前にあれば、公演名ではなく別のものを指している語(「物販は「チェキ券」のみ」「新曲「X」」)
+_NOTE_BAD_LEAD = _NOTE_BAD_WORDS + ("曲", "アルバム", "シングル", "衣装", "テーマ", "タグ")
+_NOTE_LEAD_CHARS = 12
+_NOTE_DATE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[/月]\s*(\d{1,2})(?!\d)")
+_NOTE_URL_RE = re.compile(r"(?:https?://|[\w-]+\.(?:com|net|jp)/)\S*", re.IGNORECASE)
+
+
+def _note_dates_only_elsewhere(lines: List[str], event_date: Optional[str]) -> bool:
+    """メモに公演日と違う日付だけが書かれているか(複数の公演を1つのメモに書いた形)。
+
+    発売・受付の行の日付は公演日ではないので数えない。
+    """
+    if not event_date:
+        return False
+    try:
+        day = datetime.date.fromisoformat(event_date[:10])
+    except ValueError:
+        return False
+    found = set()
+    for ln in lines:
+        if any(k in ln for k in _TICKET_KW):
+            continue
+        for mo, d in _NOTE_DATE_RE.findall(_NOTE_URL_RE.sub("", unicodedata.normalize("NFKC", ln))):
+            if 1 <= int(mo) <= 12 and 1 <= int(d) <= 31:
+                found.add((int(mo), int(d)))
+    return bool(found) and (day.month, day.day) not in found
+
+
+def _note_title_ok(title: str, group_name: Optional[str]) -> bool:
+    if not 3 <= len(title) <= 50:
+        return False
+    if any(c in title for c in "「」『』") or any(w in title for w in _NOTE_BAD_WORDS):
+        return False
+    if is_no_event_title(title) or looks_placeholder(title) or parse_tentative_title(title):
+        return False
+    if group_name and ticketdive._norm_name(title) == ticketdive._norm_name(group_name):
+        return False
+    return True
+
+
+def _note_quote_key(text: str) -> str:
+    return re.sub(r"\s", "", unicodedata.normalize("NFKC", text)).lower()
+
+
+def note_title(note: Optional[str], event_date: Optional[str] = None,
+               group_name: Optional[str] = None) -> Optional[str]:
+    """メモから公演名を読む。確実に言えるときだけ返し、迷えば None。
+
+    「イベント名:」などの見出しを最優先し、無ければ異なる引用がちょうど1種類のときだけ採る。
+    「物販は「チェキ券」のみ」のような引用が題名になるのを防ぐため、最初の引用を無条件には採らない。
+    """
+    if not note:
+        return None
+    lines = [ln for ln in venuetext._html_to_lines(note) if ln]
+    if _note_dates_only_elsewhere(lines, event_date):
+        return None
+    labeled = []
+    for ln in lines:
+        m = _NOTE_LABEL_RE.match(ln)
+        if m:
+            value = m.group(1).strip()
+            q = _NOTE_QUOTE_RE.search(value)
+            labeled.append((q.group(1) if q else value).strip("「『」』 　"))
+    if labeled:
+        # 見出しがあるのに読めないメモは、別の引用へ逃げず書き換えない
+        if len({_note_quote_key(t) for t in labeled}) != 1:
+            return None
+        return labeled[0] if _note_title_ok(labeled[0], group_name) else None
+    quotes = []
+    for ln in lines:
+        for m in _NOTE_QUOTE_RE.finditer(ln):
+            quotes.append((m.group(1).strip("「『」』 　"), ln[max(0, m.start() - _NOTE_LEAD_CHARS):m.start()]))
+    if len({_note_quote_key(t) for t, _ in quotes}) != 1:
+        return None
+    if any(w in lead for _, lead in quotes for w in _NOTE_BAD_LEAD):
+        return None
+    return quotes[0][0] if _note_title_ok(quotes[0][0], group_name) else None
 
 # 発売/受付日時を表す語。この直後に M/D [HH:MM] が続く書式を正規表現で拾う。
 _SALE_KW = r"(?:先着発売|一般発売|一般販売|先行発売|発売|受付開始|受付|先行|抽選|販売開始|申込開始)"
@@ -378,17 +512,14 @@ def fetch_public_events(alias: str, skipped: Optional[list] = None):
             continue
         note = ev.get("note") or ""
         ticket_url = _ticket_url_from_note(note) or (ev.get("link_url") or "").strip() or None
-        # イベント名の整形: 絵文字/装飾を除去。プレースホルダ(「ライブ予定」等)は
-        # メモの引用名で補完し、それも無く手掛かりが無ければ取り込まない。
+        # イベント名の整形: 絵文字/装飾を除去。題名の書き換えは行を作ったあとで
+        # worker.resolve_tentative_title が行う(チケットページ→メモの順に見るため)。
         title = _core_name(raw_title) or raw_title
-        if looks_placeholder(raw_title):
-            quoted = _title_from_note(note)
-            if quoted:
-                title = quoted
-            elif not ticket_url:
-                # 実体名もチケットも無い漠然とした予定 → ノイズなのでスキップ
-                continue
-            # チケットがあれば残す(TicketDive補完で正式名が入る)
+        if (looks_placeholder(raw_title) and not ticket_url and not _title_from_note(note)
+                and not note_title(note, d.isoformat())):
+            # 実体名もチケットも無い漠然とした予定 → ノイズなのでスキップ。
+            # 引用があるメモは、題名に絞れなくても公演の存在を示すので残す。
+            continue
         venue = (ev.get("location_name") or ev.get("location_address") or "").strip() or None
         events.append({
             "id": str(ev.get("id")),
