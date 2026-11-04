@@ -39,8 +39,13 @@ _TICKET_KW = ("チケット", "発売", "受付", "先行", "抽選", "予約", 
 
 # --- イベント名の整形/プレースホルダ判定 ---
 # 前後の絵文字・記号を落として表示用の芯を取り出す(\w はPython3では日本語も含む)
-_NAME_HEAD = re.compile(r"^[^\w【（「『]+")
-_NAME_TAIL = re.compile(r"[^\w】）」』!?！？]+$")
+_NAME_HEAD = re.compile(r"^[^\w【（(「『]+")
+_NAME_TAIL = re.compile(r"[^\w】）)」』!?！？]+$")
+# 判定(プレースホルダ/公演なし)専用。半角括弧も飾りとして落とす従来の芯で比べ、
+# 表示用の括弧の扱いを直しても判定結果が変わらないようにする。
+# 例: 表示用の芯をそのまま使うと「ライブ(仮)」がプレースホルダになり取り込まれなくなる。
+_JUDGE_HEAD = re.compile(r"^[^\w【（「『]+")
+_JUDGE_TAIL = re.compile(r"[^\w】）」』!?！？]+$")
 # メモ内の 「」『』 に囲まれた実イベント名
 _QUOTED_RE = re.compile(r"[「『]([^」』\n]{3,50})[」』]")
 # 実体名の無い"予定"系プレースホルダ(例: ライブ予定 / 重要イベント予定 / 大阪遠征 / 遠征予定)
@@ -55,9 +60,14 @@ def _core_name(title: str) -> str:
     return t.strip()
 
 
+def _judge_core(title: str) -> str:
+    """判定用の芯。表示用の _core_name と違い、前後の半角括弧も落とす。"""
+    return _JUDGE_TAIL.sub("", _JUDGE_HEAD.sub("", title or "")).strip()
+
+
 def looks_placeholder(title: str) -> bool:
     """実イベント名を持たない汎用的な"予定"表記なら True。"""
-    core = _core_name(title)
+    core = _judge_core(title)
     body = re.sub(r"[（(【][^）)】]*[）)】]", "", core).strip()  # (出演日未定)等の括弧書きを除く
     norm = re.sub(r"\s|　", "", body)
     if not norm:
@@ -82,7 +92,7 @@ _NO_EVENT_RE = re.compile(
 
 def is_no_event_title(title: str) -> bool:
     """タイトル全体が「公演が無いことの告知」なら True。カレンダー取り込みと既存行の掃除で共用。"""
-    t = _core_name(unicodedata.normalize("NFKC", title or ""))
+    t = _judge_core(unicodedata.normalize("NFKC", title or ""))
     # 空白・句読点・括弧と、不可視の制御文字を落として比べる
     t = "".join(c for c in t if unicodedata.category(c)[0] not in "ZP"
                 and unicodedata.category(c) not in ("Cc", "Cf"))
