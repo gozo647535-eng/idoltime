@@ -453,6 +453,99 @@ def enrich_row_with_ticketdive(row: dict) -> dict:
     return row
 
 
+def _usable_real_title(title: Optional[str]) -> bool:
+    """実在の公演名として扱ってよい題か(仮タイトル・告知・見出し・受付・放送の類を除く)。"""
+    t = (title or "").strip()
+    if not t or timetree.is_no_event_title(t) or timetree.looks_placeholder(t):
+        return False
+    if timetree.parse_tentative_title(t) or _GENERIC_HEADING.match(t):
+        return False
+    if _RECEPTION_ONLY.search(t) and not _REAL_GATHERING.search(t):
+        return False
+    return not sites._is_media_title(t)
+
+
+def _title_from_own_ticket(row: dict, date: str, title_place: Optional[str]):
+    """自分の TicketDive ページの公演名を、公演日が一致し会場が食い違わないときだけ返す。
+
+    返り値 (公演名|None, ページの会場|None)。ページは取り込みですでに読むものなので取得は増えない。
+    """
+    url = row.get("ticket_url")
+    if not date or not ticketdive.is_ticketdive_url(url):
+        return None, None
+    info = _td_info(url)
+    if not info or not _usable_real_title(info.get("event_name")):
+        return None, None
+    day_stages = info.get("day_stages") or []
+    page_dates = {d.get("date") for d in day_stages} | {(info.get("event_datetime") or "")[:10]}
+    if date not in page_dates:
+        return None, None
+    page_venue = ticketdive.venue_by_date(day_stages).get(date) or info.get("venue")
+    if page_venue and (venuetext.places_conflict(row.get("other_details"), page_venue)
+                       or venuetext.places_conflict(title_place, page_venue)):
+        return None, None
+    return info["event_name"], page_venue
+
+
+def resolve_tentative_title(row: dict, idol_name: Optional[str] = None, use_ticket: bool = True,
+                            retitled: Optional[list] = None, declined: Optional[list] = None) -> Optional[str]:
+    """仮タイトルの行を、その予定自身の情報(チケットページ→メモ)で書き換える。
+
+    取り込みのたびに同じ入力から計算するので、カレンダーの更新にそのまま追随する。
+    expand_timetree_row の後・書き込みと _fanout_lineup の前に呼ぶ。根拠が確かでなければ
+    何も変えない(誤った題は仮タイトルより悪い)。返り値は採った根拠。書き換えなければ None。
+    """
+    old = row.get("event_name") or ""
+    tentative = timetree.parse_tentative_title(old)
+    if not tentative and not timetree.looks_placeholder(old):
+        return None
+    date = (row.get("event_datetime") or "")[:10]
+    note = row.get("raw_text")
+    title_place = (tentative or {}).get("place")
+    new, why, page_venue = None, None, None
+    if use_ticket:
+        new, page_venue = _title_from_own_ticket(row, date, title_place)
+        why = "TicketDive(公演日一致)" if new else None
+    if not new:
+        picked = timetree.note_title(note, date or None, idol_name)
+        if picked and _usable_real_title(picked):
+            new, why = picked, "メモ"
+    if not new:
+        first_quote = timetree._title_from_note(note or "")
+        if first_quote:
+            print(f"  メモの引用を題名にせず: {old} / 引用「{first_quote}」")
+            if declined is not None:
+                declined.append((date, row.get("idol_slug"), old, first_quote))
+        return None
+    row["event_name"] = new
+    # 題を書き換えるとタイトルの場所が消えるので、会場欄が空なら移す
+    if (not row.get("other_details") and not page_venue
+            and venuetext.place_kind(title_place) in ("area", "venue")):
+        row["other_details"] = clean_venue(title_place)
+    print(f"  仮タイトルを書き換え: {old} → {new}(根拠: {why}) {date}")
+    if retitled is not None:
+        retitled.append((date, row.get("idol_slug"), old, new, why))
+    return why
+
+
+def _report_retitles(label: str, retitled: list, declined: list) -> None:
+    """取り込みでの書き換えと、題名にしなかった引用を、人が全件確かめられるように出す。"""
+    if not retitled and not declined:
+        return
+    print(f"{label}: 仮タイトルの書き換え {len(retitled)} 件 / 題名にしなかった引用 {len(declined)} 件")
+    lines = [f"\n### {label}: 仮タイトルの書き換え {len(retitled)} 件\n\n"]
+    if retitled:
+        lines.append("| 公演日 | グループ | 旧タイトル | 新タイトル | 根拠 |\n|---|---|---|---|---|\n")
+        lines += [f"| {d} | {_venue_md(s)} | {_venue_md(o)} | {_venue_md(n)} | {_venue_md(w)} |\n"
+                  for d, s, o, n, w in retitled]
+    if declined:
+        lines.append(f"\n題名にしなかった引用 {len(declined)} 件\n\n"
+                     "| 公演日 | グループ | タイトル | 引用 |\n|---|---|---|---|\n")
+        lines += [f"| {d} | {_venue_md(s)} | {_venue_md(o)} | {_venue_md(q)} |\n"
+                  for d, s, o, q in declined]
+    _append_step_summary("".join(lines))
+
+
 def build_row(tweet, username: str, idol_slug: str, info: dict) -> dict:
     open_t, entry_t = timetree.extract_open_entry(tweet.text)
     return {
@@ -1029,6 +1122,7 @@ def run_gcal() -> int:
     fanout_slugs = set()
     gc_shrunk = []   # 反映より削除が多かったグループ(退行の早期発見用)
     no_event = []    # 弾いた「公演なし」の告知 [(グループ名, タイトル)]
+    retitled, declined = [], []  # 仮タイトルの書き換えと、題名にしなかった引用
     for entry in watch:
         slug, name, gc_url = entry["idol_slug"], entry["name"], entry["gc_url"]
         cal_id = gcal.extract_calendar_id(gc_url)
@@ -1058,6 +1152,8 @@ def run_gcal() -> int:
             ev["is_first_come"] = first_come
             row = build_gcal_row(slug, name, gc_url, ev)
             if row:
+                # Googleカレンダーは TicketDive の補完を呼ばない経路なので、メモだけを見る
+                resolve_tentative_title(row, name, use_ticket=False, retitled=retitled, declined=declined)
                 rows.append(row)
                 emitted.add(row["tweet_id"])
         try:
@@ -1084,6 +1180,7 @@ def run_gcal() -> int:
         print("⚠ 反映より削除が多かったグループ: "
               + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in gc_shrunk))
     _report_no_event_skips("Googleカレンダー", no_event)
+    _report_retitles("Googleカレンダー", retitled, declined)
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"Googleカレンダー取り込み完了: 合計 {total} 件 / "
           f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
@@ -1941,6 +2038,7 @@ def run_timetree() -> int:
     fanout_slugs = set()
     tt_shrunk = []   # 反映より削除が多かったグループ(退行の早期発見用)
     no_event = []    # 弾いた「公演なし」の告知 [(グループ名, タイトル)]
+    retitled, declined = [], []  # 仮タイトルの書き換えと、題名にしなかった引用
     for entry in watch:
         slug, name, tt_url = entry["idol_slug"], entry["name"], entry["tt_url"]
         alias = timetree.extract_alias(tt_url)
@@ -1975,6 +2073,7 @@ def run_timetree() -> int:
             if row:
                 # 複数日フェスは出演日ごとに分割してから、各行をTicketDiveで高精度化
                 for r in expand_timetree_row(row, name):
+                    resolve_tentative_title(r, name, retitled=retitled, declined=declined)
                     enrich_row_with_ticketdive(r)
                     try:
                         sb.upsert_auto_event(r)
@@ -2001,6 +2100,7 @@ def run_timetree() -> int:
         print("⚠ 反映より削除が多かったグループ: "
               + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in tt_shrunk))
     _report_no_event_skips("TimeTree", no_event)
+    _report_retitles("TimeTree", retitled, declined)
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"TimeTree 取り込み完了: 合計 {total} 件 / "
           f"出演者への相互反映 {fanout} 件({len(fanout_slugs)}グループ) / 過去分 {x_removed} 件削除")
@@ -3657,6 +3757,295 @@ def _run_venues_guarded() -> None:
         print(f"⚠ 会場スケジュールの収集に失敗しました(後続は続行): {e}")
 
 
+# --- 仮タイトルの照合(段0: 試運転。DB は読むだけ) ---
+# 仮タイトルの行と本物の行の時刻差がこれを超えたら、同じ公演とみなさない(仮の値)
+PLACEHOLDER_TIME_GAP_MIN = 180
+PLACEHOLDER_TARGET_PREFIXES = ("tt:", "gc:", "site:")
+# 同じ公演の本物の行として採ってよい行。ttx: は本文の名前一致で作られ誤りの余地があるので
+# 採らないが、「同じ会場に2件」などの数には含める(多く数えるほど見送りに倒れる)
+PLACEHOLDER_SOURCE_PREFIXES = ("yrt:", "ep:", "cur:", "ven:", "tt:", "gc:", "site:")
+PLACEHOLDER_SUMMARY_MAX = 200
+PLACEHOLDER_NEAR_MISS_MAX = 50
+
+# 販売サイトの個別ページ。一覧や主催者のページ、壊れたURLを同じ公演の根拠にしない
+_TICKET_PAGE_RE = re.compile(
+    r"(?:ticketdive\.com/event/|t-dv\.com/|livepocket\.jp/e/|tiget\.net/events/)([A-Za-z0-9_-]+)",
+    re.IGNORECASE)
+
+_placeholder_aliases_cache = None
+
+
+def _placeholder_aliases() -> dict:
+    global _placeholder_aliases_cache
+    if _placeholder_aliases_cache is None:
+        _placeholder_aliases_cache = venuetext.venue_alias_map(venues.load_registry())
+    return _placeholder_aliases_cache
+
+
+def _ticket_page_key(url: Optional[str]):
+    """同じ販売ページなら同じ値。t-dv.com と ticketdive.com は同じサイトとして扱う。"""
+    m = _TICKET_PAGE_RE.search(url or "")
+    return (_source_of_url(url), m.group(1)) if m else None
+
+
+def _minutes_of(value: Optional[str]) -> Optional[int]:
+    m = re.search(r"(?:^|[ T])(\d{1,2}):(\d{2})", value or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def _placeholder_time_gap(row: dict, cand: dict) -> Optional[int]:
+    """時刻差(分)。候補は公演日時と開場の近いほうで比べる。どちらかに時刻が無ければ None。"""
+    mine = _minutes_of(row.get("event_datetime"))
+    if mine is None:
+        mine = _minutes_of(row.get("open_time"))
+    theirs = [m for m in (_minutes_of(cand.get("event_datetime")), _minutes_of(cand.get("open_time")))
+              if m is not None]
+    if mine is None or not theirs:
+        return None
+    return min(abs(mine - m) for m in theirs)
+
+
+def _candidate_place(cand: dict) -> Optional[str]:
+    return cand.get("other_details") or venuetext.place_from_title(cand.get("event_name"))
+
+
+def _is_same_day_real_row(row: dict, cand: dict) -> bool:
+    """row と同じグループ・同じ日の、別の本物の行か。"""
+    return (cand.get("tweet_id") != row.get("tweet_id")
+            and cand.get("idol_slug") == row.get("idol_slug")
+            and (cand.get("event_datetime") or "")[:10] == (row.get("event_datetime") or "")[:10]
+            and not cand.get("hidden")
+            and _usable_real_title(cand.get("event_name")))
+
+
+def _adoptable(cand: dict) -> bool:
+    return (cand.get("tweet_id") or "").startswith(PLACEHOLDER_SOURCE_PREFIXES)
+
+
+def _placeholder_place(row: dict, aliases=None):
+    """仮タイトル行の場所を (分類, 場所, 食い違い) で返す。タイトルと会場欄のより具体的なほうを使う。"""
+    parsed = timetree.parse_tentative_title(row.get("event_name")) or {}
+    title_place, detail = parsed.get("place"), row.get("other_details")
+    conflict = venuetext.places_conflict(title_place, detail, aliases)
+    rank = {"none": 0, "wide": 1, "area": 2, "venue": 3}
+    # 同じ具体さなら会場欄(食い違いは上で判定済み)
+    place = max((detail, title_place), key=lambda p: rank[venuetext.place_kind(p)])
+    return venuetext.place_kind(place), place, conflict
+
+
+def match_placeholder(row: dict, candidates: list, aliases=None) -> dict:
+    """仮タイトル行1件を、同じ公演の本物の行と対応づける。DB を読まない純粋関数。
+
+    対応づけるのは、同じ販売ページ(規則T)か、会場の完全一致がちょうど1件(規則A)で、
+    時刻差が PLACEHOLDER_TIME_GAP_MIN 以内のときだけ。エリア一致・場所なしは候補が1件でも
+    対応づけない(候補が1件なのは、こちらが取れた公演が1件というだけのため)。
+    """
+    kind, place, conflict = _placeholder_place(row, aliases)
+    same_day = [c for c in candidates if _is_same_day_real_row(row, c)]
+    basis = {}
+
+    def result(status, reason, rule=None, hits=()):
+        hit_ids = {c.get("tweet_id") for c in hits}
+        views = []
+        for c in same_day:
+            views.append({
+                "tweet_id": c.get("tweet_id"),
+                "title": c.get("event_name"),
+                "venue": _candidate_place(c),
+                "basis": basis.get(c.get("tweet_id")) or "なし",
+                "gap_min": _placeholder_time_gap(row, c),
+                "hit": c.get("tweet_id") in hit_ids,
+            })
+        return {"status": status, "reason": reason, "rule": rule, "place_kind": kind, "place": place,
+                "n_candidates": len(same_day), "candidates": views}
+
+    def too_far(c):
+        gap = _placeholder_time_gap(row, c)
+        return gap is not None and gap > PLACEHOLDER_TIME_GAP_MIN
+
+    if not same_day:
+        return result("no_candidate", "同日の本物の行なし")
+    # 規則A・Tの根拠を先に記録する(見送りのときも人が見られるように)
+    page = _ticket_page_key(row.get("ticket_url"))
+    url_rows = [c for c in same_day if page and _ticket_page_key(c.get("ticket_url")) == page]
+    for c in url_rows:
+        basis[c.get("tweet_id")] = "URL一致"
+    same_place = [c for c in same_day if venuetext.same_venue(place, _candidate_place(c), aliases)]
+    for c in same_place:
+        basis[c.get("tweet_id")] = "URL一致+会場一致" if c in url_rows else "会場一致"
+
+    if conflict:
+        return result("skipped", "タイトルと会場欄の場所が食い違う")
+    # 規則T
+    url_ok = [c for c in url_rows if _adoptable(c)
+              and not venuetext.places_conflict(place, _candidate_place(c), aliases)]
+    url_hits = [c for c in url_ok if not too_far(c)]
+    if url_hits:
+        return result("matched", "同じ販売ページ", "T", url_hits)
+    url_far = "同じ販売ページだが時刻差が大きい" if url_ok else None
+    # 規則A
+    if kind == "venue":
+        if len(same_place) >= 2:
+            return result("skipped", "同じ会場が2件以上(昼夜の可能性)")
+        if not same_place:
+            return result("skipped", url_far or "同じ会場の候補なし")
+        c = same_place[0]
+        if not _adoptable(c):
+            return result("skipped", "同じ会場の候補が採用元にできない行")
+        if too_far(c):
+            return result("skipped", "同じ会場だが時刻差が大きい")
+        return result("matched", "会場の完全一致", "A", [c])
+    if url_far:
+        return result("skipped", url_far)
+    if kind == "area":
+        if len(same_day) == 1 and venuetext.place_area(_candidate_place(same_day[0])) == venuetext.place_area(place):
+            basis[same_day[0].get("tweet_id")] = "エリア一致のみ"
+            return result("skipped", "エリア一致のみ(規則Bは第3段まで見送り)")
+        return result("skipped", "エリアのみで対応づけられない")
+    return result("skipped", "場所が広域または無い")
+
+
+def _enforce_one_to_one(entries: list) -> None:
+    """同じ候補に複数の仮タイトル行が当たる場合は、すべて見送る。"""
+    used = collections.Counter(
+        c["tweet_id"] for e in entries if e["match"]["status"] == "matched"
+        for c in e["match"]["candidates"] if c["hit"])
+    for e in entries:
+        m = e["match"]
+        if m["status"] == "matched" and any(c["hit"] and used[c["tweet_id"]] > 1 for c in m["candidates"]):
+            m.update(status="skipped", rule=None, reason="同じ候補に複数の仮タイトル行が当たる")
+            for c in m["candidates"]:
+                c["hit"] = False
+
+
+def placeholder_shadow_report(rows: list) -> dict:
+    """読んだ行から、仮タイトル行ごとの判定結果をまとめる。何も書かない。"""
+    aliases = _placeholder_aliases()
+    by_group: dict = {}
+    for r in rows:
+        by_group.setdefault(r.get("idol_slug"), []).append(r)
+    entries, near_miss = [], collections.Counter()
+    ttx_tentative = 0
+    for r in rows:
+        tid, title = r.get("tweet_id") or "", r.get("event_name") or ""
+        if r.get("hidden") or not title or timetree.is_no_event_title(title):
+            continue
+        if not timetree.parse_tentative_title(title):
+            if "予定" in title and not tid.startswith("ttx:"):
+                near_miss[title] += 1
+            continue
+        if tid.startswith("ttx:"):
+            ttx_tentative += 1
+        if not tid.startswith(PLACEHOLDER_TARGET_PREFIXES):
+            continue
+        date = (r.get("event_datetime") or "")[:10]
+        slug = r.get("idol_slug") or ""
+        note_name = timetree.note_title(r.get("raw_text"), date or None, slug.split(":", 1)[-1])
+        entries.append({
+            "row": r,
+            "prefix": tid.split(":", 1)[0] + ":",
+            "match": match_placeholder(r, by_group.get(r.get("idol_slug"), []), aliases),
+            "note_title": note_name if _usable_real_title(note_name) else None,
+        })
+    _enforce_one_to_one(entries)
+    entries.sort(key=lambda e: (e["row"].get("event_datetime") or "", e["row"].get("tweet_id") or ""))
+    statuses = collections.Counter(e["match"]["status"] for e in entries)
+    return {
+        "entries": entries,
+        "total": len(entries),
+        "matched": statuses["matched"],
+        "skipped": statuses["skipped"],
+        "no_candidate": statuses["no_candidate"],
+        "by_prefix": collections.Counter(e["prefix"] for e in entries),
+        "ttx_tentative": ttx_tentative,
+        "note_title": sum(1 for e in entries if e["note_title"]),
+        "near_miss": near_miss,
+    }
+
+
+def _placeholder_head(e: dict) -> str:
+    r, m = e["row"], e["match"]
+    place = f"{m['place_kind']}:{m['place']}" if m["place"] else m["place_kind"]
+    extra = "".join((
+        f" | メモの題名候補「{e['note_title']}」" if e["note_title"] else "",
+        " | 出演時刻あり(第2段では隠さない)" if r.get("stage_time") else "",
+    ))
+    return (f"{r.get('event_datetime')} | {r.get('idol_slug')} | {r.get('event_name')} | "
+            f"{e['prefix']} | 場所 {place} | id={r.get('tweet_id')}{extra}")
+
+
+def _gap_label(gap: Optional[int]) -> str:
+    return "不問(時刻なし)" if gap is None else f"{gap}分"
+
+
+def _print_placeholder_report(report: dict) -> None:
+    print(f"仮タイトルの照合(試運転・DB変更なし): 仮タイトル {report['total']} 件"
+          f"({' / '.join(f'{k} {n}' for k, n in sorted(report['by_prefix'].items()))}) / "
+          f"対応あり {report['matched']} / 見送り {report['skipped']} / "
+          f"同日の本物の行なし {report['no_candidate']} / "
+          f"メモに題名候補あり {report['note_title']} / 仮タイトルの ttx: 行 {report['ttx_tentative']}")
+    for status, label in (("matched", "対応あり"), ("skipped", "見送り")):
+        for e in report["entries"]:
+            m = e["match"]
+            if m["status"] != status:
+                continue
+            rule = f"規則{m['rule']}: " if m["rule"] else ""
+            print(f"  [{label}: {rule}{m['reason']}] {_placeholder_head(e)}")
+            for c in m["candidates"]:
+                mark = "→" if c["hit"] else "-"
+                print(f"      {mark} 候補: {c['title']} | 会場 {c['venue'] or '不明'} | "
+                      f"根拠 {c['basis']} | 時刻差 {_gap_label(c['gap_min'])} | id={c['tweet_id']}")
+    if report["near_miss"]:
+        shown = report["near_miss"].most_common(PLACEHOLDER_NEAR_MISS_MAX)
+        print(f"  「予定」を含むが仮タイトルに当たらない題(近似): {sum(report['near_miss'].values())} 件 "
+              + " / ".join(f"「{t}」×{n}" for t, n in shown))
+
+
+def placeholder_summary_markdown(report: dict) -> str:
+    lines = ["", "## 仮タイトルの照合(試運転・DB変更なし)", "",
+             f"仮タイトル {report['total']} 件 / 対応あり {report['matched']} / 見送り {report['skipped']} / "
+             f"同日の本物の行なし {report['no_candidate']} / メモに題名候補あり {report['note_title']} / "
+             f"仮タイトルの ttx: 行 {report['ttx_tentative']}", ""]
+    listed = [e for e in report["entries"] if e["match"]["status"] != "no_candidate"]
+    if listed:
+        lines += ["| 公演日時 | グループ | タイトル | 接頭辞 | 場所 | 判定 | 候補 | 候補の会場 | 根拠 | 時刻差 | 正誤 |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|"]
+        # 対応ありを先に並べる。上限で切れても人が判定したい行が残るように
+        listed.sort(key=lambda e: e["match"]["status"] != "matched")
+        for e in listed[:PLACEHOLDER_SUMMARY_MAX]:
+            r, m = e["row"], e["match"]
+            verdict = f"対応あり(規則{m['rule']})" if m["rule"] else f"見送り: {m['reason']}"
+            head = (f"| {_venue_md(r.get('event_datetime'))} | {_venue_md(r.get('idol_slug'))} | "
+                    f"{_venue_md(r.get('event_name'))} | {e['prefix']} | {_venue_md(m['place'])} | {_venue_md(verdict)} |")
+            for c in m["candidates"]:
+                lines.append(f"{head} {_venue_md(c['title'])} | {_venue_md(c['venue'])} | "
+                             f"{_venue_md(c['basis'])} | {_gap_label(c['gap_min'])} |  |")
+        if len(listed) > PLACEHOLDER_SUMMARY_MAX:
+            lines += ["", f"ほか {len(listed) - PLACEHOLDER_SUMMARY_MAX} 件はログを参照"]
+    if report["near_miss"]:
+        lines += ["", f"近似(「予定」を含むが仮タイトルに当たらない題): {sum(report['near_miss'].values())} 件", ""]
+        lines += [f"- {_venue_md(t)} ×{n}" for t, n in report["near_miss"].most_common(PLACEHOLDER_NEAR_MISS_MAX)]
+    return "\n".join(lines) + "\n"
+
+
+def reconcile_placeholder_rows() -> dict:
+    """仮タイトル行と本物の行の対応を、ログとステップサマリーに出す。DB は読むだけで何も変えない。"""
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    report = placeholder_shadow_report(sb.get_upcoming_rows_for_placeholder(today))
+    _print_placeholder_report(report)
+    _append_step_summary(placeholder_summary_markdown(report))
+    return report
+
+
+def _reconcile_placeholder_guarded() -> None:
+    """試運転なので、失敗しても後続を止めない。"""
+    try:
+        reconcile_placeholder_rows()
+    except Exception as e:
+        traceback.print_exc()
+        print(f"⚠ 仮タイトルの照合に失敗しました(後続は続行): {e}")
+
+
 def main() -> int:
     # X_ONLY=true は twikit(X取り込み)の動作確認用。サイト巡回/TimeTreeを飛ばしXだけ実行する。
     x_only = os.environ.get("X_ONLY", "").lower() == "true"
@@ -3682,6 +4071,7 @@ def main() -> int:
         return 0
     if discovery_only:
         run_yahoo_rt(discover_sites=False)
+        _reconcile_placeholder_guarded()
         refresh_sale_info()
         # URLの修復は1回洗えば終わりだが、点検自体は数回の読み取りで済むので
         # 軽量モードでも回す(新しく混ざった分をその日のうちに直せる)。
@@ -3736,6 +4126,7 @@ def main() -> int:
         run_livepocket()
         run_tiget()
         run_release()
+        _reconcile_placeholder_guarded()
         refresh_sale_info()
         fix_ticket_urls()
         cleanup_orphan_rows()

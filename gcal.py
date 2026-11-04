@@ -16,7 +16,8 @@ import urllib.request
 import timetree  # イベント名の整形・メモからのチケットURL抽出を共用
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
-EXTRACT_VERSION = "gc4"  # チケットURLの切り出しを直したので再取り込み
+# gc4: チケットURLの切り出しを直した
+EXTRACT_VERSION = "gc5"  # メモの題名の読み方を厳格化し、仮タイトルにも広げたので再取り込み
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
@@ -183,14 +184,13 @@ def _build(fields: dict, cal_id: str, today, skipped=None):
         return None
     title = timetree._core_name(stripped) or stripped or raw_title
     ticket_url = timetree._ticket_url_from_note(note) or link
-    # 「予定」「遠征予定」のような実体名の無い行は、メモの引用名で補えなければ
-    # 取り込まない(TimeTree 側と同じ判断)。
-    if timetree.looks_placeholder(stripped or raw_title):
-        quoted = timetree._title_from_note(note)
-        if quoted:
-            title = quoted
-        elif not ticket_url:
-            return None
+    # 「予定」「遠征予定」のような実体名の無い行は、メモにも手掛かりが無ければ
+    # 取り込まない(TimeTree 側と同じ判断)。題名の書き換えは行を作ったあとで
+    # worker.resolve_tentative_title が行う。
+    if (timetree.looks_placeholder(stripped or raw_title) and not ticket_url
+            and not timetree._title_from_note(note)
+            and not timetree.note_title(note, str(day))):
+        return None
     uid = (fields.get("UID") or ("", ""))[0].strip()
     ev_id = hashlib.sha1(f"{cal_id}|{uid or raw_title}|{day}".encode("utf-8")).hexdigest()[:20]
     return {
