@@ -1104,6 +1104,51 @@ def _report_no_event_skips(label: str, collected: list) -> None:
     _append_step_summary("".join(lines))
 
 
+def _counts_text(values) -> str:
+    """値の並びを「文翠麗 ×7, 他 ×1」の形にまとめる。"""
+    return ", ".join(f"{v} ×{n}" for v, n in collections.Counter(values).most_common())
+
+
+def _report_agency_drops(label: str, agency: dict) -> None:
+    """共有カレンダーで除外した他グループの予定・判定不能・試運転の結果を、
+    ログとステップサマリーにまとめて出す(_report_no_event_skips と同じ形)。"""
+    dropped = agency.get("dropped") or []
+    unclear = agency.get("unclear") or []
+    trial = agency.get("trial") or []
+    unmatched = agency.get("unmatched") or []
+    if not (dropped or unclear or trial or unmatched):
+        return
+
+    def by_cal(items):
+        out = {}
+        for it in items:
+            out.setdefault((it[0], it[1]), []).append(it)
+        return out.items()
+
+    lines = [f"### {label}: 共有カレンダーの他グループ予定を除外: {len(dropped)} 件\n"]
+    for (name, alias), items in by_cal(dropped):
+        tags = [t for it in items for t in it[2][len("other-tag:"):].split(",")]
+        labels = [it[3] for it in items if it[3]]
+        tail = f"（label: {_counts_text(labels)}）" if labels else ""
+        lines.append(f"- {name}（{alias}）: {_counts_text(tags)}{tail}\n")
+    lines.append(f"### {label}: 共有カレンダー上の判定不能（残しました）: {len(unclear)} 件\n")
+    for (name, alias), items in by_cal(unclear):
+        labels = [it[2] for it in items if it[2]]
+        tail = f"（label: {_counts_text(labels)}）" if labels else ""
+        lines.append(f"- {name}（{alias}）: {_titles_with_counts([it[3] for it in items])}{tail}\n")
+    lines.append(f"### {label}: 試運転: 共有と判定しなかったカレンダーの他グループタグ: {len(trial)} 件\n")
+    for (name, alias), items in by_cal(trial):
+        tags = [t for it in items for t in it[2]]
+        lines.append(f"- {name}（{alias}）: タグ {_counts_text(tags)} 例「{items[0][3]}」\n")
+    if unmatched:
+        lines.append(f"### {label}: 所属タグ名が複数あるが持ち主と一致しないカレンダー: {len(unmatched)} 件\n")
+        for name, alias, tags in unmatched:
+            lines.append(f"- {name}（{alias}）: {', '.join(tags)}\n")
+    text = "".join(lines)
+    print(text.replace("### ", ""), end="")
+    _append_step_summary("\n" + text.replace("\n### ", "\n\n### ") + "\n")
+
+
 def run_gcal() -> int:
     """Google 公開カレンダー(ICS)を巡回してイベントを取り込む。
 
@@ -2027,7 +2072,11 @@ def run_timetree() -> int:
     print(f"TimeTree 監視対象: {len(watch)} 件")
     today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
     watch = _rotate(watch, today, "tq", TT_BATCH, "TimeTree")
-    lineup_idx = lineup.build_index(build_idol_name_list())
+    idols = build_idol_name_list()
+    lineup_idx = lineup.build_index(idols)
+    # 共有カレンダーの判定で、持ち主の言及を別名でも拾うため
+    owner_aliases = {i.get("idol_slug"): (i.get("aliases") or []) for i in (idols or [])
+                     if isinstance(i, dict)}
     print(f"出演者の相互反映に使う登録グループ: {len(lineup_idx)} 件")
     try:
         repair_lineup_days(lineup_idx, today)
@@ -2039,6 +2088,7 @@ def run_timetree() -> int:
     tt_shrunk = []   # 反映より削除が多かったグループ(退行の早期発見用)
     no_event = []    # 弾いた「公演なし」の告知 [(グループ名, タイトル)]
     retitled, declined = [], []  # 仮タイトルの書き換えと、題名にしなかった引用
+    agency = {"dropped": [], "unclear": [], "trial": [], "unmatched": []}  # 共有カレンダーの判定ログ
     for entry in watch:
         slug, name, tt_url = entry["idol_slug"], entry["name"], entry["tt_url"]
         alias = timetree.extract_alias(tt_url)
@@ -2062,7 +2112,27 @@ def run_timetree() -> int:
         count = 0
         removed = 0
         emitted_ids = set()
+        # 事務所の共有カレンダーなら、他グループの予定を持ち主の行にしない
+        aliases = owner_aliases.get(slug) or []
+        verdict = timetree.classify_calendar(events, name, aliases)
+        if verdict.unmatched_multi:
+            print(f"  所属タグ名が複数あるが持ち主と一致しない: {', '.join(sorted(verdict.tags))}")
+            agency["unmatched"].append((name, alias, sorted(verdict.tags)))
         for ev in events:
+            kind, reason = timetree.classify_event(ev, name, aliases, verdict.shared)
+            if kind == "drop":
+                # build_timetree_row に渡さない → emitted_ids に入らず、再突合で既存行も消える。
+                # チケット抽出(Gemini フォールバック)より前に弾く。
+                print(f"  共有カレンダーの他グループ予定を除外: {ev.get('title')} "
+                      f"({reason}, label={ev.get('label')})")
+                agency["dropped"].append((name, alias, reason, ev.get("label"), ev.get("title")))
+                continue
+            if kind == "unclear":
+                agency["unclear"].append((name, alias, ev.get("label"), ev.get("title")))
+            elif reason == "other-tag-unshared":
+                tags = sorted(t for t in timetree.affiliation_tags(ev.get("note"))
+                              if t in verdict.others)
+                agency["trial"].append((name, alias, tags, ev.get("title")))
             # メモにチケット発売情報があれば発売日時/先着を補完(正規表現優先・取れない時だけGemini)
             sale_dt, first_come = timetree.extract_note_ticket(
                 gemini_client, ev["title"], ev.get("note") or "", today)
@@ -2100,6 +2170,7 @@ def run_timetree() -> int:
         print("⚠ 反映より削除が多かったグループ: "
               + " / ".join(f"{n}({c}件反映・{r}件削除)" for n, c, r in tt_shrunk))
     _report_no_event_skips("TimeTree", no_event)
+    _report_agency_drops("TimeTree", agency)
     _report_retitles("TimeTree", retitled, declined)
     x_removed = sum(_cleanup_past_by_date_suffix(s2, today, "ttx") for s2 in fanout_slugs)
     print(f"TimeTree 取り込み完了: 合計 {total} 件 / "
@@ -3420,6 +3491,76 @@ def cleanup_no_event_rows() -> int:
     return len(doomed)
 
 
+def cleanup_agency_rows() -> int:
+    """保存済みの tt 行に共有カレンダーの判定をかけ、他グループの予定の行を消す。
+
+    取り込み時の判定(run_timetree)と同じ関数を、event_name / raw_text にかける。
+    カレンダーは内容が変わったときしか再突合されず、巡回の順番待ちもあるので、
+    取り込みで弾くだけでは既存の誤行が残る。派生した ttx 行(再突合の対象外)も一緒に消す。
+    図鑑の状態に関係なく判定できるので、孤児の判定の歯止めとは独立に動かす。
+    """
+    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    try:
+        idols = build_idol_name_list()
+    except Exception as e:
+        print(f"共有カレンダーの掃除: 登録グループ一覧の取得に失敗: {e}")
+        return 0
+    if not isinstance(idols, list) or not idols:
+        return 0
+    owners = {}
+    for i in idols:
+        if isinstance(i, dict) and i.get("idol_slug") and i.get("name"):
+            owners.setdefault(i["idol_slug"], (i["name"], i.get("aliases") or []))
+    if not owners:
+        return 0
+    try:
+        rows = sb.get_future_text_rows("tt:", today)
+    except Exception as e:
+        print(f"共有カレンダーの掃除: 読み込みに失敗: {e}")
+        return 0
+    if not isinstance(rows, list):
+        return 0
+
+    by_slug = {}
+    for r in rows:
+        tid = (r or {}).get("tweet_id") or ""
+        if tid.startswith("tt:") and r.get("idol_slug") in owners:
+            by_slug.setdefault(r["idol_slug"], []).append(r)
+    doomed = []
+    detail = {}  # 持ち主名 -> [他グループ名]
+    for slug, rs in by_slug.items():
+        name, aliases = owners[slug]
+        evs = [{"title": r.get("event_name") or "", "note": r.get("raw_text") or ""} for r in rs]
+        verdict = timetree.classify_calendar(evs, name, aliases)
+        if not verdict.shared:
+            continue
+        for r, ev in zip(rs, evs):
+            kind, reason = timetree.classify_event(ev, name, aliases, verdict.shared)
+            if kind == "drop":
+                doomed.append(r["tweet_id"])
+                detail.setdefault(name, []).extend(reason[len("other-tag:"):].split(","))
+    if not doomed:
+        return 0
+
+    derived = []
+    for tid in doomed:
+        try:
+            derived.extend(sb.get_auto_event_ids_like(f"ttx:*:{tid[len('tt:'):]}:*") or [])
+        except Exception as e:
+            print(f"共有カレンダーの掃除: 派生 ttx の読み込みに失敗 {tid[:40]}: {e}")
+    try:
+        sb.delete_auto_events(doomed + [t for t in derived if t not in doomed])
+    except Exception as e:
+        print(f"共有カレンダーの掃除: 削除に失敗: {e}")
+        return 0
+    groups = " / ".join(f"{n}: {_counts_text(tags).replace(' ×', ' ')}" for n, tags in detail.items())
+    extra = f"・派生 ttx {len(derived)} 件" if derived else ""
+    msg = f"共有カレンダーの他グループ行を削除: {len(doomed)} 件{extra}（{groups}）"
+    print(msg)
+    _append_step_summary(f"\n### {msg}\n\n" + "".join(f"- {t}\n" for t in doomed))
+    return len(doomed)
+
+
 def cleanup_orphan_rows() -> int:
     """図鑑からリンクを外したグループの行を掃除する。
 
@@ -3432,6 +3573,10 @@ def cleanup_orphan_rows() -> int:
     ttx(対バンの相互反映)も、元のカレンダーが無くなったなら消す。
     """
     cleanup_no_event_rows()
+    try:
+        cleanup_agency_rows()
+    except Exception as e:
+        print(f"共有カレンダーの掃除に失敗(次回また試します): {e}")
     try:
         tt_slugs = {e["idol_slug"] for e in build_timetree_watch_list()}
         gc_slugs = {e["idol_slug"] for e in build_gcal_watch_list()}
