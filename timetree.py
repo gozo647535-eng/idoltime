@@ -529,6 +529,9 @@ def fetch_public_events(alias: str, skipped: Optional[list] = None):
             "note": note,
             "ticket_url": ticket_url,
             "page_url": (ev.get("url") or "").strip() or None,
+            # カレンダー運営側が付けたラベル(事務所共有カレンダーでは所属グループ名)。
+            # DB には保存しないので判定には使わず、除外ログの裏付けにだけ使う。
+            "label": (ev.get("public_calendar_label") or {}).get("name"),
         })
     return content_hash, events
 
@@ -593,3 +596,135 @@ def calendar_belongs_to(group_name: str, cal_title: str) -> bool:
     nm = _CAL_SQUASH.sub("", _cal_core(group_name))
     ct = _CAL_SQUASH.sub("", _cal_core(cal_title))
     return bool(nm) and len(nm) >= 3 and nm == ct
+
+
+# --- 事務所共有カレンダーの誤帰属対策 -----------------------------------------
+# 1つの公開カレンダーに複数グループの予定が載っている(事務所の共有カレンダー)と、
+# 図鑑で持ち主にしたグループの行に他グループの予定まで入る(ペチュニアのカレンダーで
+# ギミラブ！に文翠麗の予定が入っていた)。メモの所属タグ「#<グループ名>YYYY年M月」で
+# 共有カレンダーかを決め、他グループのタグがあり持ち主の言及が無い予定だけを外す。
+# 判定は title / note しか見ないので、DB の保存済み行(event_name / raw_text)や
+# Google カレンダーにもそのまま使える。
+
+_AFFILIATION_TAG = re.compile(r"#([^\s#]+?)\s*(\d{4})年(\d{1,2})月")
+_MIN_KEY_LEN = 3  # calendar_belongs_to と揃える。短い名前は他の語に紛れやすい
+
+
+def _group_key(s: str) -> str:
+    """グループ名の比較用の形(calendar_belongs_to と同じ正規化)。"""
+    return _CAL_SQUASH.sub("", _cal_core(s or ""))
+
+
+def _text_keys(s: str) -> List[str]:
+    """本文の比較用の形。_cal_core の括弧落としは「出演(ギミラブ！)」のような言及まで
+    消してしまうので、括弧を残した形も併せて返す(言及ありの判定は残す側なので広く取る)。"""
+    s = s or ""
+    loose = re.sub(r"&#\d+;", "'", s)
+    loose = _CAL_QUOTES.sub("", unicodedata.normalize("NFKC", loose))
+    loose = _CAL_SQUASH.sub("", ticketdive._norm_name(_CAL_DECOR.sub("", loose)))
+    return [_group_key(s), loose]
+
+
+def _owner_keys(owner_name: str, aliases=None) -> List[str]:
+    keys = []
+    for n in [owner_name, *(aliases or [])]:
+        k = _group_key(n)
+        if len(k) >= _MIN_KEY_LEN and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def affiliation_tags(note: Optional[str]) -> set:
+    """メモの所属タグ(#<グループ名>YYYY年M月)のグループ名を正規化して返す。
+    日付の付かないタグ(#一ノ瀬みやび など)はメンバー名・イベント名にも使われるので数えない。
+    全角の「＃」は NFKC で「#」になるので拾える。"""
+    text = unicodedata.normalize("NFKC", note or "")
+    out = set()
+    for m in _AFFILIATION_TAG.finditer(text):
+        k = _group_key(m.group(1))
+        if len(k) >= _MIN_KEY_LEN:
+            out.add(k)
+    return out
+
+
+def same_group(a: str, b: str) -> bool:
+    """正規化して完全一致するか、短い方(3文字以上)が長い方の先頭に一致すれば同じグループ。
+    「ギミラブ候補生」は「ギミラブ」側として扱う。"""
+    ka, kb = _group_key(a), _group_key(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    short, long_ = (ka, kb) if len(ka) <= len(kb) else (kb, ka)
+    return len(short) >= _MIN_KEY_LEN and long_.startswith(short)
+
+
+def _is_owner_tag(tag: str, owner_name: str, aliases=None) -> bool:
+    return any(same_group(tag, n) for n in [owner_name, *(aliases or [])] if n)
+
+
+def mentions_owner(title: Optional[str], note: Optional[str], owner_name: str,
+                   aliases=None) -> Optional[bool]:
+    """タイトルかメモに持ち主(または別名)の名前が含まれるか。
+    持ち主の正規化名が3文字未満(別名も含めて使える名前が無い)なら None(判定不能)。"""
+    keys = _owner_keys(owner_name, aliases)
+    if not keys:
+        return None
+    texts = _text_keys(title) + _text_keys(note)
+    return any(k in t for k in keys for t in texts)
+
+
+class CalendarVerdict:
+    """classify_calendar の結果。tags: 所属タグに出てきたグループ名、others: そのうち持ち主以外。"""
+
+    __slots__ = ("shared", "tags", "others", "owner_tagged")
+
+    def __init__(self, shared: bool, tags: set, others: set, owner_tagged: bool):
+        self.shared = shared
+        self.tags = tags
+        self.others = others
+        self.owner_tagged = owner_tagged
+
+    @property
+    def unmatched_multi(self) -> bool:
+        """所属タグ名が複数あるが、どれも持ち主と一致しない(人の点検対象)。"""
+        return len(self.tags) >= 2 and not self.owner_tagged
+
+    def __repr__(self):
+        return (f"CalendarVerdict(shared={self.shared}, tags={sorted(self.tags)}, "
+                f"others={sorted(self.others)})")
+
+
+def classify_calendar(events, owner_name: str, aliases=None) -> CalendarVerdict:
+    """今後の予定の所属タグから、共有カレンダーかを決める。
+    所属タグのグループ名が2種以上あり、うち1つが持ち主なら共有。
+    (略称タグだけの単独カレンダーはタグ名が1種なので共有にならない)"""
+    tags = set()
+    for ev in events or []:
+        tags |= affiliation_tags((ev or {}).get("note"))
+    owner_tagged = any(_is_owner_tag(t, owner_name, aliases) for t in tags)
+    others = {t for t in tags if not _is_owner_tag(t, owner_name, aliases)}
+    shared = len(tags) >= 2 and owner_tagged
+    return CalendarVerdict(shared, tags, others, owner_tagged)
+
+
+def classify_event(ev: dict, owner_name: str, aliases=None, shared=False):
+    """1件の予定を ("keep"|"drop"|"unclear", reason) に振り分ける。
+    drop は「共有カレンダー上で、他グループの所属タグがあり、持ち主の言及が無い」ときだけ。
+    shared には bool か classify_calendar の結果を渡せる。"""
+    if isinstance(shared, CalendarVerdict):
+        shared = shared.shared
+    ev = ev or {}
+    m = mentions_owner(ev.get("title"), ev.get("note"), owner_name, aliases)
+    if m is None:
+        return "keep", "owner-name-too-short"
+    if m:
+        return "keep", "owner-mentioned"  # 対バン・共演もここ
+    ot = {t for t in affiliation_tags(ev.get("note")) if not _is_owner_tag(t, owner_name, aliases)}
+    if ot and shared:
+        return "drop", "other-tag:" + ",".join(sorted(ot))
+    if ot:
+        return "keep", "other-tag-unshared"  # 試運転ログのみ
+    if shared:
+        return "unclear", "no-signal"  # 残す＋ログ
+    return "keep", "ordinary"
