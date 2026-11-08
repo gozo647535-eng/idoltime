@@ -1401,17 +1401,21 @@ TT_BATCH = int(os.environ.get("TT_BATCH") or 45)
 # 公演がこの日数内のグループを「直前」として先に巡回する。出演時刻は公演の
 # 直前に書き込まれるため、ここを過ぎてから読んでも間に合わない。
 IMMINENT_DAYS = int(os.environ.get("IMMINENT_DAYS") or 4)
-# 1回の巡回枠のうち、直前のグループに割り当てる割合。全部を直前優先にすると
-# 出演予定が無いグループ(=取り込めていないグループ)がいつまでも読まれない。
-IMMINENT_SHARE = float(os.environ.get("IMMINENT_SHARE", "0.6"))
+# 1回の巡回枠のうち、直前でないグループに必ず残す割合(床)。直前組が
+# 何組あってもこの分は残すので、出演予定が無いグループ(=取り込めていない
+# グループ)がいつまでも読まれない事態を防ぐ。逆に直前組は、床を引いた
+# 残り全部まで広げてよい(以前は直前6割で固定され、27組を超えた直前組が
+# 公演前日でも落とされていた)。
+REST_FLOOR_SHARE = float(os.environ.get("REST_FLOOR_SHARE", "0.2"))
 
 
 def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: bool = True):
     """巡回対象を上限 batch 件に絞る。登録数が増えても実行時間を一定に保つ。
 
     枠を2つに分ける。
-      ① 公演が近い順(IMMINENT_DAYS 日内)。枠の IMMINENT_SHARE を割り当てる
-      ② 今後のイベントが少ない順 → 最後に巡回した日が古い順。残りの枠
+      ① 公演が近い順(IMMINENT_DAYS 日内)。②の床を引いた残り全部まで使える
+      ② 今後のイベントが少ない順 → 最後に巡回した日が古い順。枠の
+         REST_FLOOR_SHARE 分は必ずこちらに残す
 
     ①が要るのは出演時刻のため。「出演19:35-20:00」は公演の1〜3日前に各グループが
     カレンダーへ書き込むので、直前のグループを後回しにするとタイムテーブルを
@@ -1450,12 +1454,17 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: 
         (e for e in watch if e not in soon),
         key=lambda e: (counts.get(e["idol_slug"], 0), last_seen(e)),
     )
-    n_soon = min(len(soon), int(batch * IMMINENT_SHARE))
+    # ②に床の分だけ先に確保し、①は残り全部まで広げる
+    floor_rest = min(len(rest), int(batch * REST_FLOOR_SHARE))
+    n_soon = min(len(soon), batch - floor_rest)
     picked = soon[:n_soon] + rest[: batch - n_soon]
     # 片方が足りなければもう片方で埋める
     if len(picked) < batch:
         extra = [e for e in soon[n_soon:] + rest if e not in picked]
         picked += extra[: batch - len(picked)]
+    soon_slugs = {e["idol_slug"] for e in soon}
+    picked_soon = sum(1 for e in picked if e["idol_slug"] in soon_slugs)
+    dropped_soon = len(soon) - picked_soon
     # record=False のときは呼び出し側が「実際に処理できたグループ」だけを記録する
     # (枠切れで抽出できなかったグループまで巡回済みにすると、次の順番が一巡後に
     # なってしまい、いつまでも取り込めない)
@@ -1465,8 +1474,9 @@ def _rotate(watch, today: str, key_prefix: str, batch: int, label: str, record: 
         except Exception as e2:
             print(f"  巡回日の記録に失敗(次回も同じ順番になります): {e2}")
     thin = sum(1 for e in picked if counts.get(e["idol_slug"], 0) < 3)
+    dropped_note = f"・直近なのに次回送り {dropped_soon} 件" if dropped_soon else ""
     print(f"  今回の{label}巡回は {len(picked)} / {len(watch)} 件"
-          f"({IMMINENT_DAYS}日内に公演 {n_soon} 件・今後3件未満 {thin} 件を優先・残りは次回)")
+          f"({IMMINENT_DAYS}日内に公演 {picked_soon} 件・今後3件未満 {thin} 件を優先{dropped_note}・残りは次回)")
     return picked
 
 
