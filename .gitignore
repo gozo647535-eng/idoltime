@@ -8,3 +8,6 @@ accounts.json
 __pycache__/
 *.pyc
 *.log
+
+# Claude Code のローカル設定（承認済みコマンドが保存され、秘密情報を含みうるため）
+.claude/settings.local.json
