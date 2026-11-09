@@ -634,9 +634,11 @@ def test_one_venue_error_does_not_stop_others(run_env, monkeypatch):
     assert by_id["daremo"]["fetched"] == 4
 
 
+# run_livepocket_sweep はフル巡回に加わった手順(LivePocket 開催日順の試運転)。ここで差し替えないと
+# main() のテストが実際に一覧を取りに行く
 FULL_STEPS = ("run_sites", "run_timetree", "run_gcal", "run_eplus", "run_curated", "run_yahoo_rt",
-              "run_livepocket", "run_tiget", "run_release", "refresh_sale_info", "fix_ticket_urls",
-              "cleanup_orphan_rows")
+              "run_livepocket", "run_livepocket_sweep", "run_tiget", "run_release", "refresh_sale_info",
+              "fix_ticket_urls", "cleanup_orphan_rows")
 
 
 @pytest.fixture
