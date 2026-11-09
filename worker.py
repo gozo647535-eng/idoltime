@@ -2566,6 +2566,8 @@ LIVEPOCKET_PAGES = int(os.environ.get("LIVEPOCKET_PAGES") or 3)
 LIVEPOCKET_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_FETCH_LIMIT") or 25)
 # 一覧で登録グループが当たらなかったイベントのページを取りに行く上限(上とは別枠)
 LIVEPOCKET_UNMATCHED_FETCH_LIMIT = int(os.environ.get("LIVEPOCKET_UNMATCHED_FETCH_LIMIT") or 20)
+# 一覧で登録グループが当たらなかったイベントのページを、何日あけたら読み直すか
+LIVEPOCKET_UNMATCHED_RECHECK_DAYS = int(os.environ.get("LIVEPOCKET_UNMATCHED_RECHECK_DAYS") or 3)
 
 # 1回の巡回で読み直す、取り込み済みイベントページの上限
 YRT_REFRESH_LIMIT = int(os.environ.get("YRT_REFRESH_LIMIT") or 60)
@@ -2727,6 +2729,16 @@ def _ingest_sale_url(source: str, url: str, idols, today: str, touched: set):
     return len(batch), False
 
 
+def _livepocket_last_read() -> Optional[dict]:
+    """LivePocket の各イベントページを最後に読んだ日を返す。読めなければ None。"""
+    try:
+        last = sb.get_last_seen_by_prefix("yrtu:livepocket:")
+    except Exception as e:
+        print(f"  LivePocket の最終読み取り日を取得できません: {e}")
+        return None
+    return last if isinstance(last, dict) else {}
+
+
 def run_livepocket() -> int:
     """LivePocket のアイドルカテゴリ新着一覧から、販売前・販売中のものを取り込む。
 
@@ -2761,7 +2773,12 @@ def run_livepocket() -> int:
     if not cards:
         print("LivePocket の一覧からイベントを取れませんでした。")
         return 0
-    today = datetime.datetime.now(JST).strftime("%Y-%m-%d")
+    now = datetime.datetime.now(JST)
+    today = now.strftime("%Y-%m-%d")
+    recheck_before = (now - datetime.timedelta(
+        days=LIVEPOCKET_UNMATCHED_RECHECK_DAYS)).strftime("%Y-%m-%d")
+    force = os.environ.get("YRT_FORCE", "").lower() in ("1", "true")
+    last = {} if force else (_livepocket_last_read() or {})
     idols = build_idol_name_list()
     lineup_idx = lineup.build_index(idols)
     pre = [c for c in cards if c["status"] == "販売前"]
@@ -2778,20 +2795,232 @@ def run_livepocket() -> int:
             unmatched.append(c)
     print(f"LivePocket 新着一覧: {len(cards)} 件 / 販売前 {len(pre)} 件・販売中 {len(on_sale)} 件 / "
           f"登録グループが出る {len(targets)} 件 / 出ない {len(unmatched)} 件")
+
+    # 上限で切る前に、読む必要のないカードを除く。切ってから除くと、読み終えた
+    # カードが枠を使い切り、その後ろのカードにいつまでも順番が回らない。
+    def seen_on(c) -> str:
+        return last.get(_yrt_cache_key("livepocket", c["url"])) or ""
+
+    due_targets = [c for c in targets if seen_on(c) != today]
+    # 未読("")が先頭に来る。既読は最後に読んだ日が古い順
+    due_unmatched = sorted((c for c in unmatched if seen_on(c) < recheck_before), key=seen_on)
+    fetch_targets = due_targets[:LIVEPOCKET_FETCH_LIMIT]
+    fetch_unmatched = due_unmatched[:LIVEPOCKET_UNMATCHED_FETCH_LIMIT]
+
     total = 0
     touched = set()
-    for c in targets[:LIVEPOCKET_FETCH_LIMIT]:
-        added, _ = _ingest_sale_url("livepocket", c["url"], idols, today, touched)
+    targets_fetched = 0
+    for c in fetch_targets:
+        added, was_skipped = _ingest_sale_url("livepocket", c["url"], idols, today, touched)
         total += added
+        targets_fetched += 0 if was_skipped else 1
     unmatched_fetched = 0
-    for c in unmatched[:LIVEPOCKET_UNMATCHED_FETCH_LIMIT]:
+    for c in fetch_unmatched:
         added, was_skipped = _ingest_sale_url("livepocket", c["url"], idols, today, touched)
         total += added
         unmatched_fetched += 0 if was_skipped else 1
+    print(f"LivePocket 読み取りの内訳: 登録グループが出る 対象 {len(due_targets)} 件 / "
+          f"読んだ {targets_fetched} 件 / "
+          f"上限で読まなかった {len(due_targets) - len(fetch_targets)} 件 / "
+          f"当日取得済みで対象外 {len(targets) - len(due_targets)} 件")
+    print(f"LivePocket 読み取りの内訳: 登録グループが出ない 対象 {len(due_unmatched)} 件 / "
+          f"読んだ {unmatched_fetched} 件 / "
+          f"上限で読まなかった {len(due_unmatched) - len(fetch_unmatched)} 件 / "
+          f"再確認の間隔内で対象外 {len(unmatched) - len(due_unmatched)} 件")
     removed = sum(_cleanup_past_yrt(slug, today) for slug in touched)
     print(f"LivePocket 取り込み完了: 合計 {total} 件 / 未一致分の取得 {unmatched_fetched} 件 / "
           f"過去分 {removed} 件削除")
     return total
+
+
+# --- LivePocket の開催日順巡回(案F・段2の試運転。DB は読むだけ) ---
+# 試運転なので、対象のカードをログとステップサマリーに出すところで止める。個別ページは
+# 読まず、_ingest_sale_url も呼ばない。本番化(段3)に進む条件は
+# LP-SALE-DISCOVERY-DESIGN.md §3 段2「次へ進む条件」のとおり。
+# 今日から何日先の公演までを見るか
+LP_SWEEP_DAYS = int(os.environ.get("LP_SWEEP_DAYS") or 14)
+# 1回の巡回で読む一覧ページの上限
+LP_SWEEP_MAX_PAGES = int(os.environ.get("LP_SWEEP_MAX_PAGES") or 20)
+# 一度読んだイベントページを、何日あけたら対象に戻すか
+LP_SWEEP_RETRY_DAYS = int(os.environ.get("LP_SWEEP_RETRY_DAYS") or 3)
+
+_LP_SWEEP_STOPS = {
+    "date_limit": "開催日が範囲を超えたので打ち切り",
+    "max_pages": "上限ページに到達",
+    "no_response": "途中停止: 一覧の応答なし",
+    "waf": "途中停止: WAF の認証ページ",
+    "no_cards": "途中停止: カードの無いページ",
+    "exception": "途中停止: 例外",
+}
+_LP_SWEEP_INTERRUPTED = ("no_response", "waf", "no_cards", "exception")
+_LP_SWEEP_EXCLUDED = {
+    "date_unreadable": "開催日が読めない",
+    "beyond_range": "開催日が範囲外",
+    "duplicate": "ページ間の重複",
+    "status": "販売前・販売中以外",
+    "no_group": "登録グループに当たらない",
+    "has_row": "本物の行あり",
+    "recent": "再試行の間隔内",
+}
+
+
+def _lp_sweep_read_pages(until: str) -> dict:
+    """開催日が古い順の一覧を、until を超えるか上限ページに達するまで読む。"""
+    pages, cards, seen = [], [], set()
+    excluded = dict.fromkeys(_LP_SWEEP_EXCLUDED, 0)
+    stop = "max_pages"
+    for page in range(1, LP_SWEEP_MAX_PAGES + 1):
+        try:
+            page_cards, problem = ticketsite.livepocket_listing_page(
+                page, sort=ticketsite.LIVEPOCKET_SORT_DATE_ASC)
+        except Exception as e:
+            print(f"  LivePocket 一覧の {page} ページ目で例外: {type(e).__name__} {e}")
+            page_cards, problem = [], "exception"
+        if problem:
+            stop = problem
+            break
+        dates = [c["start_date"] for c in page_cards if c.get("start_date")]
+        pages.append({"page": page, "cards": len(page_cards),
+                      "first": dates[0] if dates else None,
+                      "last": dates[-1] if dates else None})
+        over = False
+        for c in page_cards:
+            if c["url"] in seen:
+                excluded["duplicate"] += 1
+                continue
+            seen.add(c["url"])
+            date = c.get("start_date")
+            if not date:
+                excluded["date_unreadable"] += 1
+            elif date > until:
+                excluded["beyond_range"] += 1
+                over = True
+            else:
+                cards.append(c)
+        if over:
+            stop = "date_limit"
+            break
+    return {"pages": pages, "cards": cards, "excluded": excluded, "stop": stop}
+
+
+def _lp_real_row_keys(today: str) -> set:
+    """本物の yrt 行(番兵行を除く)が指す LivePocket のページを、キーの集合で返す。
+
+    同じページが t.livepocket.jp の形で保存されていても一致するよう、URL ではなく
+    キーで比べる。
+    """
+    keys = set()
+    for r in sb.get_ticket_page_rows(today, prefix="yrt:"):
+        url = r.get("ticket_url")
+        if url and _source_of_url(url) == "livepocket" and not r["tweet_id"].startswith("yrt:unmatched:"):
+            keys.add(_yrt_cache_key("livepocket", url))
+    return keys
+
+
+def _print_lp_sweep_report(report: dict) -> None:
+    print(f"LivePocket 開催日順の巡回(試運転・DB書き込みなし): {report['until']} まで / "
+          f"{len(report['pages'])} ページ / {_LP_SWEEP_STOPS[report['stop']]}")
+    for p in report["pages"]:
+        print(f"  {p['page']} ページ目: {p['cards']} 件 / 開催日 {p['first'] or '不明'} 〜 {p['last'] or '不明'}")
+    print("  除外の内訳: " + " / ".join(
+        f"{label} {report['excluded'][key]} 件" for key, label in _LP_SWEEP_EXCLUDED.items()))
+    print(f"  範囲内で開催日が今日より前のカード: {report['past']} 件")
+    print(f"  ブラウザの使用: {report['browser_used']} / {report['browser_limit']} ページ")
+    for w in report["warnings"]:
+        print(f"  ⚠ {w}")
+    print(f"  対象のカード: {len(report['targets'])} 件")
+    for c in report["targets"]:
+        print(f"    {c['start_date']} {c['name']} {c['url']}")
+
+
+def lp_sweep_summary_markdown(report: dict) -> str:
+    lines = ["## LivePocket 開催日順の巡回(試運転・DB書き込みなし)", "",
+             f"- 範囲: {report['until']} まで",
+             f"- 読んだページ: {len(report['pages'])}",
+             f"- 終了の理由: {_LP_SWEEP_STOPS[report['stop']]}",
+             f"- 途中で止まったか: {'はい' if report['interrupted'] else 'いいえ'}",
+             f"- 範囲内で開催日が今日より前のカード: {report['past']} 件",
+             f"- ブラウザの使用: {report['browser_used']} / {report['browser_limit']} ページ"]
+    lines += [f"- ⚠ {_venue_md(w)}" for w in report["warnings"]]
+    lines += ["", "| ページ | 件数 | 最初の開催日 | 最後の開催日 |", "|---|---|---|---|"]
+    lines += [f"| {p['page']} | {p['cards']} | {p['first'] or '不明'} | {p['last'] or '不明'} |"
+              for p in report["pages"]]
+    lines += ["", "| 除外の理由 | 件数 |", "|---|---|"]
+    lines += [f"| {label} | {report['excluded'][key]} |" for key, label in _LP_SWEEP_EXCLUDED.items()]
+    lines += ["", f"### 対象のカード: {len(report['targets'])} 件", "",
+              "| 開催日 | 公演名 | URL |", "|---|---|---|"]
+    lines += [f"| {c['start_date']} | {_venue_md(c['name'][:60])} | {c['url']} |"
+              for c in report["targets"]]
+    return "\n".join(lines) + "\n"
+
+
+def run_livepocket_sweep() -> dict:
+    """LivePocket の一覧を開催日が古い順に読み、取りこぼしの候補を洗い出す(試運転)。
+
+    毎時の巡回は公開日が新しい順の上位しか見ないので、窓に入らなかったカードや、
+    窓にいたときは出演者欄が空だったカードを拾えない。開催日順なら公開の順番に
+    依存せず、毎日その時点の出演者欄を見られる。
+
+    試運転なので、一覧と DB を読んで結果を出すだけで止める(書き込みの経路が無い)。
+    返り値は結果の dict。LIVEPOCKET_LISTING=0 のときは空の dict。
+    """
+    if os.environ.get("LIVEPOCKET_LISTING") == "0":
+        print("LivePocket の開催日順巡回は無効化されています(LIVEPOCKET_LISTING=0)")
+        return {}
+    now = datetime.datetime.now(JST)
+    today = now.strftime("%Y-%m-%d")
+    until = (now + datetime.timedelta(days=LP_SWEEP_DAYS)).strftime("%Y-%m-%d")
+    retry_before = (now - datetime.timedelta(days=LP_SWEEP_RETRY_DAYS)).strftime("%Y-%m-%d")
+
+    report = _lp_sweep_read_pages(until)
+    report["until"] = until
+    report["interrupted"] = report["stop"] in _LP_SWEEP_INTERRUPTED
+    report["past"] = sum(1 for c in report["cards"] if c["start_date"] < today)
+    report["browser_used"], report["browser_limit"] = ticketsite.browser_usage()
+    warnings = report["warnings"] = []
+
+    lineup_idx = lineup.build_index(build_idol_name_list())
+    if not lineup_idx:
+        warnings.append("図鑑を読めなかったので、登録グループの判定が効いていません")
+    try:
+        real_keys = _lp_real_row_keys(today)
+    except Exception as e:
+        warnings.append(f"保存済みの行を読めなかったので、本物の行による除外をしていません: {e}")
+        real_keys = set()
+    last = _livepocket_last_read()
+    if last is None:
+        warnings.append("最終読み取り日を読めなかったので、再試行の間隔による除外をしていません")
+        last = {}
+
+    excluded = report["excluded"]
+    targets = report["targets"] = []
+    for c in report["cards"]:
+        key = _yrt_cache_key("livepocket", c["url"])
+        text = f"{c['name']}\n{' / '.join(c['performers'])}"
+        if c["status"] not in ("販売前", "販売中"):
+            excluded["status"] += 1
+        elif not lineup.names_in_text(text, lineup_idx):
+            excluded["no_group"] += 1
+        elif key in real_keys:
+            excluded["has_row"] += 1
+        elif (last.get(key) or "") >= retry_before:
+            excluded["recent"] += 1
+        else:
+            targets.append(c)
+
+    # ここで止める。本番化(段3)では targets を _ingest_sale_url に渡す。
+    _print_lp_sweep_report(report)
+    _append_step_summary(lp_sweep_summary_markdown(report))
+    return report
+
+
+def _run_livepocket_sweep_guarded() -> None:
+    """試運転なので、失敗しても後続を止めない。"""
+    try:
+        run_livepocket_sweep()
+    except Exception as e:
+        traceback.print_exc()
+        print(f"⚠ LivePocket の開催日順巡回に失敗しました(後続は続行): {e}")
 
 
 # TiGET のアイドルカテゴリ新着一覧を何ページ読むか(1ページ24件)
@@ -4279,6 +4508,7 @@ def main() -> int:
         run_curated()
         run_yahoo_rt()
         run_livepocket()
+        _run_livepocket_sweep_guarded()
         run_tiget()
         run_release()
         _reconcile_placeholder_guarded()

@@ -10,6 +10,7 @@
 
 そこでサイト差をこのモジュールで吸収し、同じ形の dict を返す。
 """
+import datetime
 import gzip
 import html as _html
 import os
@@ -199,6 +200,11 @@ class _Browser:
 
 
 _BROWSER = _Browser()
+
+
+def browser_usage():
+    """このプロセスでブラウザで開いたページ数と、その上限を返す。"""
+    return _BROWSER.used, _BROWSER._MAX_PAGES
 
 
 def render(url: str, timeout: int = 30000, wait_ms: int = 6000,
@@ -570,12 +576,16 @@ def fetch_event(url: str) -> Optional[dict]:
         "act_labeled": act_labeled,
     }
 
-# LivePocket の「ファン・アイドル」カテゴリを公開日が新しい順に並べた一覧。
-# X への投稿を待たずに、公開された時点で発売を拾うために使う。
-LIVEPOCKET_IDOL_LIST = (
+# LivePocket の「ファン・アイドル」カテゴリの一覧。sort の値は一覧ページの並び替え欄による
+# (1=開催日が新しい順、2=開催日が古い順、3=公開日が新しい順、4=関連順)。
+_LIVEPOCKET_IDOL_SEARCH = (
     "https://livepocket.jp/event/search"
-    "?l_cat=%E3%83%95%E3%82%A1%E3%83%B3%E3%83%BB%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB&sort=3"
+    "?l_cat=%E3%83%95%E3%82%A1%E3%83%B3%E3%83%BB%E3%82%A2%E3%82%A4%E3%83%89%E3%83%AB"
 )
+LIVEPOCKET_SORT_DATE_ASC = 2
+LIVEPOCKET_SORT_NEWEST = 3
+# 公開日が新しい順の一覧。X への投稿を待たずに、公開された時点で発売を拾うために使う。
+LIVEPOCKET_IDOL_LIST = f"{_LIVEPOCKET_IDOL_SEARCH}&sort={LIVEPOCKET_SORT_NEWEST}"
 
 _CARD_SPLIT = re.compile(r'<li class="event-card-list__item">')
 _CARD_HREF = re.compile(r'href="(/e/[^"]+)"')
@@ -638,42 +648,80 @@ def _get_listing(url: str, timeout: int = 25):
         return None
 
 
+_CARD_DATE = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+
+
+def listing_start_date(text: Optional[str]) -> Optional[str]:
+    """カードの日程欄から開始日を YYYY-MM-DD で返す。読めなければ None。
+
+    「2026年12月27日(日) 〜2026年12月28日(月)」のような範囲表記は開始日を採る。
+    """
+    m = _CARD_DATE.search(text or "")
+    if not m:
+        return None
+    try:
+        return datetime.date(*(int(x) for x in m.groups())).isoformat()
+    except ValueError:
+        return None
+
+
+def _livepocket_cards(blocks) -> List[dict]:
+    out = []
+    for b in blocks:
+        m = _CARD_HREF.search(b)
+        if not m:
+            continue
+        cast = _card_text(b, _CARD_FIELD["cast"])
+        date = _card_text(b, _CARD_FIELD["date"])
+        out.append({
+            "url": "https://livepocket.jp" + m.group(1),
+            "status": _card_text(b, _CARD_TAG),
+            "name": _card_text(b, _CARD_TITLE),
+            "date": date,
+            "start_date": listing_start_date(date),
+            "venue": _card_text(b, _CARD_FIELD["venue"]),
+            "performers": _split_performers(cast),
+        })
+    return out
+
+
+def livepocket_listing_page(page: int = 1, sort: int = LIVEPOCKET_SORT_NEWEST):
+    """アイドルカテゴリの一覧を1ページ読み、(カードのリスト, 問題) を返す。
+
+    問題は、読めたときは None。読めなかったときは "no_response"(応答なし)、
+    "waf"(認証ページのまま)、"no_cards"(カードの無いページ)のいずれかで、
+    カードのリストは空になる。
+    """
+    url = f"{_LIVEPOCKET_IDOL_SEARCH}&sort={sort}" + (f"&page={page}" if page > 1 else "")
+    html = _get_listing(url)
+    if not html:
+        return [], "no_response"
+    blocks = _CARD_SPLIT.split(html)[1:]
+    if not blocks:
+        # 実行環境によっては別のページ(同意画面など)が返ることがあるので、
+        # 何が返ってきたか分かるようにしておく
+        title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+        head = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html[:400])).strip()
+        print(f"    LivePocket 一覧にカードがありません({len(html)}字"
+              f" / title={_html.unescape(title.group(1)).strip()[:40] if title else 'なし'})"
+              f" 冒頭: {head[:120]}")
+        return [], "waf" if bot_wall(html) else "no_cards"
+    return _livepocket_cards(blocks), None
+
+
 def livepocket_listing(pages: int = 3):
     """アイドルカテゴリの新着一覧を読み、カードの内容をそのまま返す。
 
     一覧に「販売前」の表示と出演者が載っているので、ここで絞ってから
     イベントページを取りに行けば、無駄な取得をほとんどせずに済む。
-    返り値: [{url, status, name, date, venue, performers[]}]
+    返り値: [{url, status, name, date, start_date, venue, performers[]}]
     """
     out = []
     for page in range(1, max(1, pages) + 1):
-        url = LIVEPOCKET_IDOL_LIST + (f"&page={page}" if page > 1 else "")
-        html = _get_listing(url)
-        if not html:
+        cards, problem = livepocket_listing_page(page)
+        if problem:
             break
-        blocks = _CARD_SPLIT.split(html)[1:]
-        if not blocks:
-            # 実行環境によっては別のページ(同意画面など)が返ることがあるので、
-            # 何が返ってきたか分かるようにしておく
-            title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
-            head = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html[:400])).strip()
-            print(f"    LivePocket 一覧にカードがありません({len(html)}字"
-                  f" / title={_html.unescape(title.group(1)).strip()[:40] if title else 'なし'})"
-                  f" 冒頭: {head[:120]}")
-            break
-        for b in blocks:
-            m = _CARD_HREF.search(b)
-            if not m:
-                continue
-            cast = _card_text(b, _CARD_FIELD["cast"])
-            out.append({
-                "url": "https://livepocket.jp" + m.group(1),
-                "status": _card_text(b, _CARD_TAG),
-                "name": _card_text(b, _CARD_TITLE),
-                "date": _card_text(b, _CARD_FIELD["date"]),
-                "venue": _card_text(b, _CARD_FIELD["venue"]),
-                "performers": _split_performers(cast),
-            })
+        out.extend(cards)
     return out
 
 # TiGET のアイドルカテゴリ一覧(categories=29)を公開が新しい順に並べたもの。
