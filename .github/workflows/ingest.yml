@@ -116,9 +116,33 @@ jobs:
         if: ${{ github.event.inputs.x_only == 'true' || vars.ENABLE_X_INGEST == '1' }}
         continue-on-error: true
         run: pip install aiohttp "git+https://codeberg.org/phin/twikit.git"
-      # JSレンダリング(公式サイトがSPAの場合の予定取得)用に Chromium を導入
-      - name: Install Playwright Chromium
-        run: python -m playwright install --with-deps chromium
+      # JSレンダリング(公式サイトがSPAの場合の予定取得)用に Chromium を導入。
+      # 本体のダウンロード(apt不要)と、システムライブラリの導入(apt)を分ける。
+      # --with-deps の apt は、DNS失敗で worker が起動しなかったり、ミラーの
+      # 停滞でジョブ全体の120分を食い潰したりした実績がある(2026-11-11)。
+      # ライブラリ導入は制限時間つき・失敗しても続行にし、失敗した回は
+      # ブラウザ予備手段なしで巡回が完走する(ticketsite 側は起動失敗を握って
+      # 通常取得に落ちる作り)。
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+      - name: Install Playwright Chromium (browser only)
+        run: python -m playwright install chromium
+      - name: Install Playwright Chromium system libraries
+        timeout-minutes: 10
+        continue-on-error: true
+        run: |
+          ok=0
+          for i in 1 2; do
+            if python -m playwright install-deps chromium; then ok=1; break; fi
+            echo "::warning::Chromium のシステムライブラリ導入に失敗しました (試行 $i/2)"
+            sleep 15
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::warning::この回はブラウザ予備手段なしで巡回します"
+          fi
       - name: Restore X session cookies
         run: printf '%s' "$X_COOKIES_JSON" > cookies.json
         env:
