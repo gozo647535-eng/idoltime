@@ -161,6 +161,40 @@ def test_event_page_8iavg(monkeypatch):
     assert info["performers"] == ["透色ドロップ"]
 
 
+def _sale_lines(*blocks):
+    """LivePocket の受付ブロックの並び(実ページと同じ行構成)を組み立てる。"""
+    lines = []
+    for kind, start, end in blocks:
+        if kind:
+            lines += ["販売中", kind, f"{kind}販売受付"]
+        lines += ["販売受付期間", start, f"〜{end}"]
+    return lines
+
+
+def test_livepocket_sale_prefers_first_come_even_if_lottery_comes_first():
+    # 抽選ブロックが先に並ぶページでも、先着の開始日時を発売日時にする
+    lines = _sale_lines(
+        ("抽選", "2026年10月30日(金) 20:00", "2026年11月7日(土) 23:59"),
+        ("先着", "2026年11月9日(月) 20:00", "2026年11月14日(土) 12:45"),
+    )
+    assert ticketsite._livepocket_sale(lines) == "2026-11-09 20:00:00"
+
+
+def test_livepocket_sale_lottery_only_page_keeps_lottery_start():
+    lines = _sale_lines(
+        ("抽選", "2026年10月30日(金) 20:00", "2026年11月7日(土) 23:59"),
+    )
+    assert ticketsite._livepocket_sale(lines) == "2026-10-30 20:00:00"
+
+
+def test_livepocket_sale_without_labels_falls_back_to_first_block():
+    lines = _sale_lines(
+        (None, "2026年10月30日(金) 20:00", "2026年11月7日(土) 23:59"),
+        (None, "2026年11月9日(月) 20:00", "2026年11月14日(土) 12:45"),
+    )
+    assert ticketsite._livepocket_sale(lines) == "2026-10-30 20:00:00"
+
+
 # --- 案B: run_livepocket の上限の切り方 ---
 
 def lp_card(name, status="販売中"):

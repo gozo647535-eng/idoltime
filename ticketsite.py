@@ -425,12 +425,33 @@ _JP_DT_LINE = re.compile(
     r"(20\d\d)\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日[^\d]{0,6}(\d{1,2})\s*[:：]\s*(\d{2})")
 
 
+def _sale_block_kind(lines, i):
+    """販売受付期間の見出しの直前の表示から、その受付が先着か抽選かを判定する。
+
+    LivePocket の受付ブロックは「販売中 / 先着 / 先着販売受付 / 販売受付期間」の
+    並びで、見出しの数行上に種別が出る。公演説明など本文中の言及に反応しない
+    よう、さかのぼる範囲は見出しの直前4行に限る。
+    """
+    for ln in reversed(lines[max(0, i - 4):i]):
+        if "抽選" in ln:
+            return "lottery"
+        if "先着" in ln:
+            return "first"
+    return None
+
+
 def _livepocket_sale(lines):
     """LivePocket の「販売受付期間」から発売開始日時を取る。
 
     LivePocket の JSON-LD には validFrom が無く(offers は価格だけ)、
     発売開始はページ本文にしか書かれていない。
+
+    先着と抽選が併記されるページでは、先着の受付の開始日時を優先する。
+    実ページでは先着が先に並ぶ例しか確認できていない(2026-11-12 に76件走査)が、
+    並びが変わっても抽選の開始日時を「先着の発売日時」として保存しないための
+    予防。抽選だけのページでは従来どおり最初の抽選期間を返す。
     """
+    blocks = []
     for i, ln in enumerate(lines):
         if "販売受付期間" not in ln and "受付期間" not in ln:
             continue
@@ -441,8 +462,15 @@ def _livepocket_sale(lines):
             m = _JP_DT_LINE.search(nxt)
             if m:
                 y, mo, d, h, mi = (int(x) for x in m.groups())
-                return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:00"
-    return None
+                blocks.append((_sale_block_kind(lines, i),
+                               f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:00"))
+                break
+    if not blocks:
+        return None
+    for kind, sale in blocks:
+        if kind == "first":
+            return sale
+    return blocks[0][1]
 
 
 # 券種名の下に出る販売状況・取扱いのラベル。券種名と間違えて拾わないように除く
