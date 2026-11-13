@@ -2843,6 +2843,22 @@ LP_SWEEP_DAYS = int(os.environ.get("LP_SWEEP_DAYS") or 14)
 LP_SWEEP_MAX_PAGES = int(os.environ.get("LP_SWEEP_MAX_PAGES") or 20)
 # 一度読んだイベントページを、何日あけたら対象に戻すか
 LP_SWEEP_RETRY_DAYS = int(os.environ.get("LP_SWEEP_RETRY_DAYS") or 3)
+# 開始日から終了日まで(両端を含む)が何日を超えたら、長期の催しとして対象から外すか。
+# 2〜3日のフェスは残し、数週間のコラボカフェや展示を落とす(LP-SWEEP-DATE-DESIGN.md §3.3)
+LP_SWEEP_MAX_SPAN_DAYS = int(os.environ.get("LP_SWEEP_MAX_SPAN_DAYS") or 3)
+
+
+def _lp_sweep_probe_pages(raw: str) -> tuple:
+    return tuple(int(x) for x in (s.strip() for s in raw.split(",")) if x.isdigit() and int(x) > 0)
+
+
+# 通常のページを読んだ後に1枚ずつ読み、開催日の範囲だけを記録するページ(計測用の探り読み)。
+# 遠い日付の密度とサイトの最大ページ数を測るためのもので、対象の判定には使わない。
+# 空文字を入れると探り読みをしない。PR2 で既定を空にする(LP-SWEEP-DATE-DESIGN.md §7)
+LP_SWEEP_PROBE_PAGES = _lp_sweep_probe_pages(os.environ.get("LP_SWEEP_PROBE_PAGES", "25,30,40,50"))
+# 公演名にこれを含むカードは、公演ではない催しとして対象から外す。実測のノイズに基づき
+# 少数から始める。誤除外は監査一覧で確かめる
+_LP_SWEEP_NON_SHOW_WORDS = ("コラボカフェ", "キャンペーン")
 
 _LP_SWEEP_STOPS = {
     "date_limit": "開催日が範囲を超えたので打ち切り",
@@ -2859,6 +2875,9 @@ _LP_SWEEP_EXCLUDED = {
     "duplicate": "ページ間の重複",
     "status": "販売前・販売中以外",
     "no_group": "登録グループに当たらない",
+    "ended": "開催済み",
+    "long_span": "長期の催し",
+    "non_show": "非公演の語",
     "has_row": "本物の行あり",
     "recent": "再試行の間隔内",
 }
@@ -2868,6 +2887,9 @@ def _lp_sweep_read_pages(until: str) -> dict:
     """開催日が古い順の一覧を、until を超えるか上限ページに達するまで読む。"""
     pages, cards, seen = [], [], set()
     excluded = dict.fromkeys(_LP_SWEEP_EXCLUDED, 0)
+    # 順に読んだ区間で、前のページの最後の開催日より次のページの最初の開催日が前に
+    # なったところ。開催日順に並んでいる前提(PR2 のジャンプの前提)が崩れている印
+    order_breaks = []
     stop = "max_pages"
     for page in range(1, LP_SWEEP_MAX_PAGES + 1):
         try:
@@ -2880,6 +2902,11 @@ def _lp_sweep_read_pages(until: str) -> dict:
             stop = problem
             break
         dates = [c["start_date"] for c in page_cards if c.get("start_date")]
+        if dates:
+            prev = next((p for p in reversed(pages) if p["last"]), None)
+            if prev and prev["last"] > dates[0]:
+                order_breaks.append({"prev_page": prev["page"], "prev_last": prev["last"],
+                                     "page": page, "first": dates[0]})
         pages.append({"page": page, "cards": len(page_cards),
                       "first": dates[0] if dates else None,
                       "last": dates[-1] if dates else None})
@@ -2900,7 +2927,68 @@ def _lp_sweep_read_pages(until: str) -> dict:
         if over:
             stop = "date_limit"
             break
-    return {"pages": pages, "cards": cards, "excluded": excluded, "stop": stop}
+    return {"pages": pages, "cards": cards, "excluded": excluded, "stop": stop,
+            "order_breaks": order_breaks}
+
+
+def _lp_sweep_probe(after_page: int) -> list:
+    """LP_SWEEP_PROBE_PAGES のうち after_page より後のページを1枚ずつ読み、開催日の範囲だけ返す。
+
+    計測用なので、カードは返さず、対象の判定にも使わない。読めないページに当たったら、
+    相手サイトの負担を増やさないよう、残りは読まない。
+    """
+    probes = []
+    for page in LP_SWEEP_PROBE_PAGES:
+        if page <= after_page:
+            continue
+        try:
+            page_cards, problem = ticketsite.livepocket_listing_page(
+                page, sort=ticketsite.LIVEPOCKET_SORT_DATE_ASC)
+        except Exception as e:
+            print(f"  LivePocket 一覧の {page} ページ目(探り読み)で例外: {type(e).__name__} {e}")
+            page_cards, problem = [], "exception"
+        dates = [c["start_date"] for c in page_cards if c.get("start_date")]
+        probes.append({"page": page, "cards": len(page_cards),
+                       "first": dates[0] if dates else None,
+                       "last": dates[-1] if dates else None,
+                       "problem": problem})
+        if problem:
+            break
+    return probes
+
+
+def _lp_sweep_density(cards: list, today: str):
+    """今日以降のカードから、1日あたりのカード数を求める。
+
+    最後の開催日は途中までしか読めていない可能性があるので、その日は数えない。
+    求められないとき(今日以降の日付が1日分しか無いなど)は None。
+    """
+    dates = [c["start_date"] for c in cards if c["start_date"] >= today]
+    if not dates:
+        return None
+    through = max(dates)
+    days = (datetime.date.fromisoformat(through) - datetime.date.fromisoformat(today)).days
+    if days <= 0:
+        return None
+    count = sum(1 for d in dates if d < through)
+    return {"cards": count, "days": days, "per_day": round(count / days, 1), "through": through}
+
+
+def _lp_sweep_span_days(c: dict) -> int:
+    """開始日から終了日までの日数(両端を含む)。終了日が無い・開始日より前なら1。"""
+    end = c.get("end_date")
+    if not end or end <= c["start_date"]:
+        return 1
+    return (datetime.date.fromisoformat(end) - datetime.date.fromisoformat(c["start_date"])).days + 1
+
+
+def _lp_sweep_non_show_word(name) -> Optional[str]:
+    return next((w for w in _LP_SWEEP_NON_SHOW_WORDS if w in (name or "")), None)
+
+
+def _lp_sweep_date_label(c: dict) -> str:
+    end = c.get("end_date")
+    return f"{c['start_date']}〜{end}" if end and end != c["start_date"] else c["start_date"]
 
 
 def _lp_real_row_keys(today: str) -> set:
@@ -2925,12 +3013,31 @@ def _print_lp_sweep_report(report: dict) -> None:
     print("  除外の内訳: " + " / ".join(
         f"{label} {report['excluded'][key]} 件" for key, label in _LP_SWEEP_EXCLUDED.items()))
     print(f"  範囲内で開催日が今日より前のカード: {report['past']} 件")
+    print(f"  密度: {_lp_sweep_density_text(report['density'])}")
+    print(f"  開催日順の崩れ: {len(report['order_breaks'])} か所")
     print(f"  ブラウザの使用: {report['browser_used']} / {report['browser_limit']} ページ")
     for w in report["warnings"]:
         print(f"  ⚠ {w}")
+    if report["probe_note"]:
+        print(f"  探り読み: {report['probe_note']}")
+    for p in report["probes"]:
+        print(f"  探り読み {p['page']} ページ目: {p['cards']} 件 / "
+              f"開催日 {p['first'] or '不明'} 〜 {p['last'] or '不明'}"
+              + (f" / {_LP_SWEEP_STOPS.get(p['problem'], p['problem'])}" if p["problem"] else ""))
+    print(f"  誤除外の監査(長期の催し・非公演の語で外したカード): {len(report['audit'])} 件")
+    for a in report["audit"]:
+        print(f"    [{_LP_SWEEP_EXCLUDED[a['reason']]}: {a['detail']}] {a['dates']} {a['name']} {a['url']}")
     print(f"  対象のカード: {len(report['targets'])} 件")
     for c in report["targets"]:
         print(f"    {c['start_date']} {c['name']} {c['url']}")
+
+
+def _lp_sweep_density_text(density) -> str:
+    if not density:
+        return "求められない(今日以降の開催日が足りない)"
+    return (f"1日あたり {density['per_day']} 件"
+            f"(今日から {density['through']} の前日までの {density['days']} 日で {density['cards']} 件。"
+            f"最後の日は途中までの可能性があるので数えない)")
 
 
 def lp_sweep_summary_markdown(report: dict) -> str:
@@ -2940,13 +3047,27 @@ def lp_sweep_summary_markdown(report: dict) -> str:
              f"- 終了の理由: {_LP_SWEEP_STOPS[report['stop']]}",
              f"- 途中で止まったか: {'はい' if report['interrupted'] else 'いいえ'}",
              f"- 範囲内で開催日が今日より前のカード: {report['past']} 件",
+             f"- 密度: {_lp_sweep_density_text(report['density'])}",
+             f"- 開催日順の崩れ: {len(report['order_breaks'])} か所",
              f"- ブラウザの使用: {report['browser_used']} / {report['browser_limit']} ページ"]
     lines += [f"- ⚠ {_venue_md(w)}" for w in report["warnings"]]
     lines += ["", "| ページ | 件数 | 最初の開催日 | 最後の開催日 |", "|---|---|---|---|"]
     lines += [f"| {p['page']} | {p['cards']} | {p['first'] or '不明'} | {p['last'] or '不明'} |"
               for p in report["pages"]]
+    lines += ["", "### 探り読み(計測のみ。対象の判定には使わない)", ""]
+    if report["probe_note"]:
+        lines += [f"- {report['probe_note']}"]
+    if report["probes"]:
+        lines += ["| ページ | 件数 | 最初の開催日 | 最後の開催日 | 問題 |", "|---|---|---|---|---|"]
+        lines += [f"| {p['page']} | {p['cards']} | {p['first'] or '不明'} | {p['last'] or '不明'} | "
+                  f"{_LP_SWEEP_STOPS.get(p['problem'], p['problem']) if p['problem'] else '-'} |"
+                  for p in report["probes"]]
     lines += ["", "| 除外の理由 | 件数 |", "|---|---|"]
     lines += [f"| {label} | {report['excluded'][key]} |" for key, label in _LP_SWEEP_EXCLUDED.items()]
+    lines += ["", f"### 誤除外の監査(長期の催し・非公演の語で外したカード): {len(report['audit'])} 件", "",
+              "| 理由 | 開催日 | 公演名 | URL |", "|---|---|---|---|"]
+    lines += [f"| {_LP_SWEEP_EXCLUDED[a['reason']]}: {_venue_md(a['detail'])} | {a['dates']} | "
+              f"{_venue_md(a['name'][:60])} | {a['url']} |" for a in report["audit"]]
     lines += ["", f"### 対象のカード: {len(report['targets'])} 件", "",
               "| 開催日 | 公演名 | URL |", "|---|---|---|"]
     lines += [f"| {c['start_date']} | {_venue_md(c['name'][:60])} | {c['url']} |"
@@ -2976,8 +3097,20 @@ def run_livepocket_sweep() -> dict:
     report["until"] = until
     report["interrupted"] = report["stop"] in _LP_SWEEP_INTERRUPTED
     report["past"] = sum(1 for c in report["cards"] if c["start_date"] < today)
+    report["density"] = _lp_sweep_density(report["cards"], today)
+    # 探り読みは計測だけ。結果は report["probes"] に置き、report["cards"] には入れない
+    report["probes"], report["probe_note"] = [], ""
+    if LP_SWEEP_PROBE_PAGES and report["interrupted"]:
+        report["probe_note"] = "途中停止したので読まなかった"
+    elif LP_SWEEP_PROBE_PAGES:
+        report["probes"] = _lp_sweep_probe(report["pages"][-1]["page"] if report["pages"] else 0)
+        if not report["probes"]:
+            report["probe_note"] = "指定のページはすでに読んだ範囲にある"
     report["browser_used"], report["browser_limit"] = ticketsite.browser_usage()
     warnings = report["warnings"] = []
+    for b in report["order_breaks"]:
+        warnings.append(f"開催日順が崩れています: {b['prev_page']} ページ目の最後 {b['prev_last']} の後、"
+                        f"{b['page']} ページ目の最初が {b['first']}")
 
     lineup_idx = lineup.build_index(build_idol_name_list())
     if not lineup_idx:
@@ -2994,13 +3127,29 @@ def run_livepocket_sweep() -> dict:
 
     excluded = report["excluded"]
     targets = report["targets"] = []
+    # 長期の催し・非公演の語で外したカード。情報を減らす方向の除外なので、ライブ公演を
+    # 落としていないかを目で確かめられるよう一覧に残す。登録グループに当たったカードだけを
+    # 判定するので、この一覧は「除外が無ければ対象になり得たカード」になる
+    audit = report["audit"] = []
     for c in report["cards"]:
         key = _yrt_cache_key("livepocket", c["url"])
         text = f"{c['name']}\n{' / '.join(c['performers'])}"
+        span = _lp_sweep_span_days(c)
+        word = _lp_sweep_non_show_word(c["name"])
         if c["status"] not in ("販売前", "販売中"):
             excluded["status"] += 1
         elif not lineup.names_in_text(text, lineup_idx):
             excluded["no_group"] += 1
+        elif (c.get("end_date") or c["start_date"]) < today:
+            excluded["ended"] += 1
+        elif span > LP_SWEEP_MAX_SPAN_DAYS:
+            excluded["long_span"] += 1
+            audit.append({"reason": "long_span", "detail": f"{span}日間", "dates": _lp_sweep_date_label(c),
+                          "name": c["name"] or "", "url": c["url"]})
+        elif word:
+            excluded["non_show"] += 1
+            audit.append({"reason": "non_show", "detail": word, "dates": _lp_sweep_date_label(c),
+                          "name": c["name"] or "", "url": c["url"]})
         elif key in real_keys:
             excluded["has_row"] += 1
         elif (last.get(key) or "") >= retry_before:
