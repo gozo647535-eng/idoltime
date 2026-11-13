@@ -693,6 +693,21 @@ def listing_start_date(text: Optional[str]) -> Optional[str]:
         return None
 
 
+def listing_end_date(text: Optional[str]) -> Optional[str]:
+    """カードの日程欄が範囲表記なら、後ろ側の日付を YYYY-MM-DD で返す。
+
+    日付が1つしか無いとき(範囲表記でないとき)や読めないときは None。
+    終了日が要る側は、None なら開始日を使う。
+    """
+    found = _CARD_DATE.findall(text or "")
+    if len(found) < 2:
+        return None
+    try:
+        return datetime.date(*(int(x) for x in found[-1])).isoformat()
+    except ValueError:
+        return None
+
+
 def _livepocket_cards(blocks) -> List[dict]:
     out = []
     for b in blocks:
@@ -707,6 +722,7 @@ def _livepocket_cards(blocks) -> List[dict]:
             "name": _card_text(b, _CARD_TITLE),
             "date": date,
             "start_date": listing_start_date(date),
+            "end_date": listing_end_date(date),
             "venue": _card_text(b, _CARD_FIELD["venue"]),
             "performers": _split_performers(cast),
         })
@@ -742,7 +758,8 @@ def livepocket_listing(pages: int = 3):
 
     一覧に「販売前」の表示と出演者が載っているので、ここで絞ってから
     イベントページを取りに行けば、無駄な取得をほとんどせずに済む。
-    返り値: [{url, status, name, date, start_date, venue, performers[]}]
+    返り値: [{url, status, name, date, start_date, end_date, venue, performers[]}]
+    (end_date は範囲表記の後ろ側の日付。範囲表記でなければ None)
     """
     out = []
     for page in range(1, max(1, pages) + 1):

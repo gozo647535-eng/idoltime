@@ -13,7 +13,7 @@ import pytest
 for _key in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
              "LIVEPOCKET_PAGES", "LIVEPOCKET_FETCH_LIMIT", "LIVEPOCKET_UNMATCHED_FETCH_LIMIT",
              "LIVEPOCKET_UNMATCHED_RECHECK_DAYS", "LP_SWEEP_DAYS", "LP_SWEEP_MAX_PAGES",
-             "LP_SWEEP_RETRY_DAYS", "YRT_FORCE"):
+             "LP_SWEEP_RETRY_DAYS", "LP_SWEEP_MAX_SPAN_DAYS", "LP_SWEEP_PROBE_PAGES", "YRT_FORCE"):
     os.environ.pop(_key, None)
 
 import ticketsite  # noqa: E402
@@ -96,6 +96,31 @@ def test_listing_fixture_reads_start_dates(monkeypatch):
 ])
 def test_listing_start_date(text, expected):
     assert ticketsite.listing_start_date(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("2026年11月16日(月)", None),
+    ("2026年11月21日(土) 〜2026年11月22日(日)", "2026-11-22"),
+    ("2026年8月15日(土)<br>〜2026年12月31日(木)", "2026-12-31"),
+    ("2026年12月30日(水) 〜2027年1月3日(日)", "2027-01-03"),
+    ("2026年11月21日(土) 〜2026年13月40日", None),
+    ("日程未定", None),
+    ("", None),
+    (None, None),
+])
+def test_listing_end_date(text, expected):
+    assert ticketsite.listing_end_date(text) == expected
+
+
+def test_listing_fixture_reads_end_date_of_range(monkeypatch):
+    html = fixture_html("livepocket-listing-p1.html")
+    monkeypatch.setattr(ticketsite, "_get_listing", lambda url: html)
+
+    cards, _ = ticketsite.livepocket_listing_page(1)
+
+    # 「2026年12月27日(日)<br>〜2026年12月27日(日)」の範囲表記
+    assert cards[1]["end_date"] == "2026-12-27"
+    assert all("end_date" in c for c in cards)
 
 
 def test_card_with_unreadable_date_does_not_raise(monkeypatch):
@@ -312,10 +337,10 @@ def test_yrt_force_does_not_filter(monkeypatch, run_lp, fake_sb):
 
 # --- 案F: 開催日順巡回の試運転 ---
 
-def sweep_card(name, date, status="販売前", performers=()):
+def sweep_card(name, date, status="販売前", performers=(), end=None):
     """name に hit を含むか performers に hit があると、登録グループに当たる扱いになる。"""
     return {"name": name, "url": lp_url(name), "status": status, "date": date or "調整中",
-            "start_date": date, "venue": "", "performers": list(performers)}
+            "start_date": date, "end_date": end, "venue": "", "performers": list(performers)}
 
 
 @pytest.fixture
@@ -323,8 +348,10 @@ def sweep(monkeypatch, fake_sb):
     """pages の各要素はカードのリスト、問題の文字列、例外のいずれか。
 
     (結果の dict, 読みに行ったページ番号, _ingest_sale_url の差し替え) を返す。
+    探り読み(LP_SWEEP_PROBE_PAGES)は既定で切っておき、確かめるテストだけが設定する。
     """
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", ())
 
     def run(pages, rows=(), last=None):
         monkeypatch.delenv("LIVEPOCKET_LISTING", raising=False)
@@ -559,6 +586,291 @@ def test_sweep_guard_swallows_exceptions(monkeypatch, capsys):
     monkeypatch.setattr(worker, "run_livepocket_sweep", MagicMock(side_effect=RuntimeError("壊れた")))
     worker._run_livepocket_sweep_guarded()
     assert "⚠" in capsys.readouterr().out
+
+
+# --- 案G PR1: ノイズ除外と計測(LP-SWEEP-DATE-DESIGN.md §3.3・§3.4・§7) ---
+
+def test_sweep_noise_defaults():
+    assert worker.LP_SWEEP_MAX_SPAN_DAYS == 3
+    assert worker.LP_SWEEP_PROBE_PAGES == (25, 30, 40, 50)
+    assert "コラボカフェ" in worker._LP_SWEEP_NON_SHOW_WORDS
+    assert "キャンペーン" in worker._LP_SWEEP_NON_SHOW_WORDS
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("25,30,40,50", (25, 30, 40, 50)),
+    (" 25 , 30 ", (25, 30)),
+    ("", ()),
+    ("25,x,0,30", (25, 30)),
+])
+def test_sweep_probe_pages_setting(raw, expected):
+    assert worker._lp_sweep_probe_pages(raw) == expected
+
+
+def test_sweep_excludes_ended_events_by_end_date(sweep):
+    pages = [[sweep_card("hit_ended_range", day(-3), end=day(-1)),
+              sweep_card("hit_ended_single", day(-1)),
+              sweep_card("hit_ongoing", day(-2), end=day()),
+              sweep_card("hit0", day(1))]]
+
+    report, _, _ = sweep(pages)
+
+    assert target_names(report) == ["hit_ongoing", "hit0"]
+    assert report["excluded"]["ended"] == 2
+    # 既存の「範囲内で開催日が今日より前」の数え方は変えない
+    assert report["past"] == 3
+    # 開催済みは日付で客観的に決まるので、誤除外の監査には出さない
+    assert report["audit"] == []
+
+
+@pytest.mark.parametrize("start, end, kept", [
+    (1, None, True),
+    (1, 3, True),     # 3日間(両端を含む)は残す
+    (1, 4, False),    # 4日間は長期の催し
+    (-30, 10, False),  # 開始日が過去で終了日が先の、一覧の先頭に並ぶ催し
+])
+def test_sweep_excludes_long_running_events(sweep, start, end, kept):
+    card = sweep_card("hit_event", day(start), end=day(end) if end is not None else None)
+
+    report, _, _ = sweep([[card]])
+
+    assert target_names(report) == (["hit_event"] if kept else [])
+    assert report["excluded"]["long_span"] == (0 if kept else 1)
+    assert len(report["audit"]) == (0 if kept else 1)
+
+
+def test_sweep_long_span_threshold_is_adjustable(monkeypatch, sweep):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_SPAN_DAYS", 5)
+    report, _, _ = sweep([[sweep_card("hit_fes", day(1), end=day(5)),
+                           sweep_card("hit_long", day(1), end=day(6))]])
+    assert target_names(report) == ["hit_fes"]
+    assert report["excluded"]["long_span"] == 1
+
+
+def test_sweep_excludes_non_show_words(sweep):
+    pages = [[sweep_card("hit コラボカフェ 第2弾", day(1)),
+              sweep_card("hit 来場キャンペーン", day(2)),
+              sweep_card("hit ワンマンライブ", day(2))]]
+
+    report, _, _ = sweep(pages)
+
+    assert target_names(report) == ["hit ワンマンライブ"]
+    assert report["excluded"]["non_show"] == 2
+
+
+def test_sweep_audit_lists_long_span_and_non_show_cards(sweep):
+    pages = [[sweep_card("hit_cafe_long", day(-10), end=day(20)),
+              sweep_card("hit コラボカフェ", day(1)),
+              # 登録グループに当たらないカードは、除外が無くても対象にならないので監査に出さない
+              sweep_card("miss コラボカフェ", day(1)),
+              sweep_card("hit0", day(2))]]
+
+    report, _, _ = sweep(pages)
+
+    assert report["audit"] == [
+        {"reason": "long_span", "detail": "31日間", "dates": f"{day(-10)}〜{day(20)}",
+         "name": "hit_cafe_long", "url": lp_url("hit_cafe_long")},
+        {"reason": "non_show", "detail": "コラボカフェ", "dates": day(1),
+         "name": "hit コラボカフェ", "url": lp_url("hit コラボカフェ")},
+    ]
+    assert report["excluded"]["no_group"] == 1
+
+
+def test_sweep_audit_and_new_counts_appear_in_log_and_summary(sweep, monkeypatch, tmp_path, capsys):
+    path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(path))
+    pages = [[sweep_card("hit_old", day(-2)),
+              sweep_card("hit_cafe_long", day(-10), end=day(20)),
+              sweep_card("hit コラボカフェ", day(1)),
+              sweep_card("hit0", day(2))]]
+
+    sweep(pages)
+
+    text = path.read_text(encoding="utf-8")
+    assert "| 開催済み | 1 |" in text
+    assert "| 長期の催し | 1 |" in text
+    assert "| 非公演の語 | 1 |" in text
+    assert "誤除外の監査" in text
+    assert (f"| 長期の催し: 31日間 | {day(-10)}〜{day(20)} | hit_cafe_long | "
+            f"{lp_url('hit_cafe_long')} |") in text
+    assert f"| 非公演の語: コラボカフェ | {day(1)} | hit コラボカフェ | {lp_url('hit コラボカフェ')} |" in text
+    out = capsys.readouterr().out
+    assert "開催済み 1 件" in out
+    assert f"{day(-10)}〜{day(20)} hit_cafe_long {lp_url('hit_cafe_long')}" in out
+    assert f"{day(1)} hit コラボカフェ {lp_url('hit コラボカフェ')}" in out
+
+
+def test_sweep_warns_when_date_order_breaks(monkeypatch, sweep, tmp_path, capsys):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 3)
+    path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(path))
+    pages = [[sweep_card("hit0", day(1)), sweep_card("hit1", day(3))],
+             [sweep_card("hit2", day(2)), sweep_card("hit3", day(4))],
+             [sweep_card("hit4", day(4))]]
+
+    report, requested, _ = sweep(pages)
+
+    # この PR ではジャンプが無いので、警告だけで読み方は変えない
+    assert requested == [1, 2, 3]
+    assert target_names(report) == ["hit0", "hit1", "hit2", "hit3", "hit4"]
+    assert report["order_breaks"] == [{"prev_page": 1, "prev_last": day(3), "page": 2, "first": day(2)}]
+    assert any("開催日順が崩れています" in w for w in report["warnings"])
+    assert "⚠ 開催日順が崩れています" in capsys.readouterr().out
+    text = path.read_text(encoding="utf-8")
+    assert "開催日順の崩れ: 1 か所" in text
+    assert "⚠ 開催日順が崩れています" in text
+
+
+def test_sweep_date_order_compares_across_pages_without_dates(monkeypatch, sweep):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 4)
+    pages = [[sweep_card("hit0", day(2))],
+             [sweep_card("hit1", day(2))],         # 同じ日付が続くのは崩れではない
+             [sweep_card("hit_nodate", None)],      # 開催日の無いページは飛ばして比べる
+             [sweep_card("hit2", day(1))]]
+
+    report, _, _ = sweep(pages)
+
+    assert report["order_breaks"] == [{"prev_page": 2, "prev_last": day(2), "page": 4, "first": day(1)}]
+
+
+def test_sweep_reports_density(monkeypatch, sweep, capsys):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 1)
+    pages = [[sweep_card("hit_past", day(-1)),
+              sweep_card("hit_a", day()), sweep_card("hit_b", day()),
+              sweep_card("hit_c", day(1)), sweep_card("hit_d", day(1)),
+              sweep_card("hit_e", day(1)), sweep_card("hit_f", day(1)),
+              sweep_card("hit_g", day(2))]]
+
+    report, _, _ = sweep(pages)
+
+    # 今日より前と、途中までの可能性がある最後の日(+2日)は数えない
+    assert report["density"] == {"cards": 6, "days": 2, "per_day": 3.0, "through": day(2)}
+    assert "1日あたり 3.0 件" in capsys.readouterr().out
+
+
+def test_sweep_density_is_none_without_enough_days(sweep):
+    report, _, _ = sweep([[sweep_card("hit0", day())]])
+    assert report["density"] is None
+
+
+def probe_pages(read, probes):
+    """1〜len(read) ページは read、それより後は {ページ番号: 中身} の probes を返す一覧。"""
+    last = max(probes) if probes else len(read)
+    return [read[p - 1] if p <= len(read) else probes.get(p, "no_cards") for p in range(1, last + 1)]
+
+
+def test_sweep_probe_reads_extra_pages_but_never_adds_targets(monkeypatch, sweep):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 2)
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", (25, 30))
+    pages = probe_pages(
+        [[sweep_card("hit0", day(1))], [sweep_card("hit1", day(2))]],
+        # 範囲内の日付で登録グループにも当たるが、探り読みなので対象には入れない
+        {25: [sweep_card("hit_probe25a", day(5)), sweep_card("hit_probe25b", day(6))],
+         30: [sweep_card("hit_probe30", day(8))]})
+
+    report, requested, ingest = sweep(pages)
+
+    assert requested == [1, 2, 25, 30]
+    assert target_names(report) == ["hit0", "hit1"]
+    assert [c["name"] for c in report["cards"]] == ["hit0", "hit1"]
+    assert report["probes"] == [
+        {"page": 25, "cards": 2, "first": day(5), "last": day(6), "problem": None},
+        {"page": 30, "cards": 1, "first": day(8), "last": day(8), "problem": None},
+    ]
+    # 読んだページ数・終了の理由・密度は通常の読み取りだけで決まる
+    assert [p["page"] for p in report["pages"]] == [1, 2]
+    assert report["stop"] == "max_pages"
+    assert report["interrupted"] is False
+    assert report["density"]["through"] == day(2)
+    ingest.assert_not_called()
+
+
+def test_sweep_probe_stops_at_first_problem(monkeypatch, sweep):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 1)
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", (25, 30, 40))
+    pages = probe_pages([[sweep_card("hit0", day(1))]], {25: "no_cards", 30: [sweep_card("hit_x", day(9))]})
+
+    report, requested, _ = sweep(pages)
+
+    assert requested == [1, 25]
+    assert report["probes"] == [{"page": 25, "cards": 0, "first": None, "last": None, "problem": "no_cards"}]
+    assert report["stop"] == "max_pages"
+    assert report["interrupted"] is False
+
+
+def test_sweep_probe_survives_exception(monkeypatch, sweep):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 1)
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", (25,))
+    pages = probe_pages([[sweep_card("hit0", day(1))]], {25: RuntimeError("壊れた")})
+
+    report, _, _ = sweep(pages)
+
+    assert report["probes"][0]["problem"] == "exception"
+    assert target_names(report) == ["hit0"]
+    assert report["interrupted"] is False
+
+
+def test_sweep_probe_skips_pages_already_read(monkeypatch, sweep):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 3)
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", (2, 25))
+    pages = probe_pages([[sweep_card(f"hit{i}", day(1))] for i in range(3)],
+                        {25: [sweep_card("hit_probe", day(9))]})
+
+    report, requested, _ = sweep(pages)
+
+    assert requested == [1, 2, 3, 25]
+    assert [p["page"] for p in report["probes"]] == [25]
+
+
+def test_sweep_probe_is_skipped_after_interruption(monkeypatch, sweep, capsys):
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", (25,))
+
+    report, requested, _ = sweep([[sweep_card("hit0", day(1))], "waf"])
+
+    assert requested == [1, 2]
+    assert report["probes"] == []
+    assert "途中停止したので読まなかった" in capsys.readouterr().out
+
+
+def test_sweep_probe_appears_in_summary(monkeypatch, sweep, tmp_path):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 1)
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", (25, 30))
+    path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(path))
+    pages = probe_pages([[sweep_card("hit0", day(1))]],
+                        {25: [sweep_card("hit_p", day(7)), sweep_card("hit_q", day(8))], 30: "waf"})
+
+    sweep(pages)
+
+    text = path.read_text(encoding="utf-8")
+    assert "探り読み" in text
+    assert f"| 25 | 2 | {day(7)} | {day(8)} | - |" in text
+    assert "| 30 | 0 | 不明 | 不明 | 途中停止: WAF の認証ページ |" in text
+
+
+def test_sweep_trial_with_noise_and_probe_never_writes_db(monkeypatch, sweep, fake_sb):
+    """試運転の性質: 新しい除外と探り読みが動いても、DB にも状態にも書き込まない。"""
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 2)
+    monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", (25, 30))
+    pages = probe_pages(
+        [[sweep_card("hit_old", day(-2)), sweep_card("hit_long", day(-10), end=day(20)),
+          sweep_card("hit コラボカフェ", day(1)), sweep_card("hit0", day(3))],
+         [sweep_card("hit1", day(2))]],   # 開催日順の崩れも起こす
+        {25: [sweep_card("hit_probe", day(5))], 30: "no_cards"})
+    last = {cache_key("hit0"): day(-5)}
+
+    report, requested, ingest = sweep(pages, last=last)
+
+    assert requested == [1, 2, 25, 30]
+    assert target_names(report) == ["hit0", "hit1"]
+    assert report["order_breaks"]
+    ingest.assert_not_called()
+    worker.ticketsite.fetch_event.assert_not_called()
+    fake_sb.set_last_seen.assert_not_called()
+    fake_sb.upsert_auto_events.assert_not_called()
+    called = {c[0] for c in fake_sb.method_calls}
+    assert called == {"get_ticket_page_rows", "get_last_seen_by_prefix"}
+    assert not [n for n in called if n.startswith(("set_", "upsert", "insert", "delete", "update"))]
 
 
 # --- main() への組み込み ---
