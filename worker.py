@@ -2839,8 +2839,14 @@ def run_livepocket() -> int:
 # LP-SALE-DISCOVERY-DESIGN.md §3 段2「次へ進む条件」のとおり。
 # 今日から何日先の公演までを見るか
 LP_SWEEP_DAYS = int(os.environ.get("LP_SWEEP_DAYS") or 14)
-# 1回の巡回で読む一覧ページの上限
-LP_SWEEP_MAX_PAGES = int(os.environ.get("LP_SWEEP_MAX_PAGES") or 20)
+# 1回の巡回で読む一覧ページの上限(ジャンプの推定で読むページも数える)
+LP_SWEEP_MAX_PAGES = int(os.environ.get("LP_SWEEP_MAX_PAGES") or 30)
+# 今日から何日先までを毎日読むか(近い側)。それより先は3日周回で読む(§3.1)
+LP_SWEEP_NEAR_DAYS = int(os.environ.get("LP_SWEEP_NEAR_DAYS") or 2)
+# 遠い組の開始ページを探すときの、1組あたりの推定(取得)回数の上限
+LP_SWEEP_JUMP_LIMIT = int(os.environ.get("LP_SWEEP_JUMP_LIMIT") or 4)
+# 一覧1ページのカード数(ジャンプ先の推定に使う)
+_LP_SWEEP_PAGE_SIZE = 20
 # 一度読んだイベントページを、何日あけたら対象に戻すか
 LP_SWEEP_RETRY_DAYS = int(os.environ.get("LP_SWEEP_RETRY_DAYS") or 3)
 # 開始日から終了日まで(両端を含む)が何日を超えたら、長期の催しとして対象から外すか。
@@ -2854,8 +2860,8 @@ def _lp_sweep_probe_pages(raw: str) -> tuple:
 
 # 通常のページを読んだ後に1枚ずつ読み、開催日の範囲だけを記録するページ(計測用の探り読み)。
 # 遠い日付の密度とサイトの最大ページ数を測るためのもので、対象の判定には使わない。
-# 空文字を入れると探り読みをしない。PR2 で既定を空にする(LP-SWEEP-DATE-DESIGN.md §7)
-LP_SWEEP_PROBE_PAGES = _lp_sweep_probe_pages(os.environ.get("LP_SWEEP_PROBE_PAGES", "25,30,40,50"))
+# 既定は空(探り読みをしない)。測りたいときだけ "25,30,40,50" のように指定する
+LP_SWEEP_PROBE_PAGES = _lp_sweep_probe_pages(os.environ.get("LP_SWEEP_PROBE_PAGES", ""))
 # 公演名にこれを含むカードは、公演ではない催しとして対象から外す。実測のノイズに基づき
 # 少数から始める。誤除外は監査一覧で確かめる
 _LP_SWEEP_NON_SHOW_WORDS = ("コラボカフェ", "キャンペーン")
@@ -2863,15 +2869,18 @@ _LP_SWEEP_NON_SHOW_WORDS = ("コラボカフェ", "キャンペーン")
 _LP_SWEEP_STOPS = {
     "date_limit": "開催日が範囲を超えたので打ち切り",
     "max_pages": "上限ページに到達",
+    "jump_failed": "ジャンプ失敗(遠い組の開始ページを見つけられなかった)",
+    "order_broken": "途中停止: 開催日順の崩れ",
     "no_response": "途中停止: 一覧の応答なし",
     "waf": "途中停止: WAF の認証ページ",
     "no_cards": "途中停止: カードの無いページ",
     "exception": "途中停止: 例外",
 }
-_LP_SWEEP_INTERRUPTED = ("no_response", "waf", "no_cards", "exception")
+_LP_SWEEP_INTERRUPTED = ("no_response", "waf", "no_cards", "exception", "order_broken")
 _LP_SWEEP_EXCLUDED = {
     "date_unreadable": "開催日が読めない",
     "beyond_range": "開催日が範囲外",
+    "other_turn": "次回以降に回した日付",
     "duplicate": "ページ間の重複",
     "status": "販売前・販売中以外",
     "no_group": "登録グループに当たらない",
@@ -2883,15 +2892,58 @@ _LP_SWEEP_EXCLUDED = {
 }
 
 
-def _lp_sweep_read_pages(until: str) -> dict:
-    """開催日が古い順の一覧を、until を超えるか上限ページに達するまで読む。"""
-    pages, cards, seen = [], [], set()
-    excluded = dict.fromkeys(_LP_SWEEP_EXCLUDED, 0)
-    # 順に読んだ区間で、前のページの最後の開催日より次のページの最初の開催日が前に
-    # なったところ。開催日順に並んでいる前提(PR2 のジャンプの前提)が崩れている印
-    order_breaks = []
-    stop = "max_pages"
-    for page in range(1, LP_SWEEP_MAX_PAGES + 1):
+def _lp_sweep_far_runs(today: datetime.date, near_days: int, days: int) -> list:
+    """遠い側のうち、今日読む日付の連続区間を [(開始, 終了), ...] で返す(状態を持たない)。
+
+    遠い側は今日+near_days+1 〜 今日+days。暦の日付を3日ずつの組(toordinal()//3)に分け、
+    組の番号を3で割った余りが今日の toordinal() % 3 と一致する組だけを読む。同じ日付は
+    今日の位置によらず、ちょうど3日おきに読まれる(LP-SWEEP-DATE-DESIGN.md §3.1)。
+    """
+    turn = today.toordinal() % 3
+    one = datetime.timedelta(days=1)
+    runs = []
+    d = today + datetime.timedelta(days=near_days + 1)
+    last = today + datetime.timedelta(days=days)
+    while d <= last:
+        if (d.toordinal() // 3) % 3 == turn:
+            if runs and runs[-1][1] == d - one:
+                runs[-1][1] = d
+            else:
+                runs.append([d, d])
+        d += one
+    return [(a.isoformat(), b.isoformat()) for a, b in runs]
+
+
+def _lp_sweep_estimate_page(lo_page: int, lo_last: str, target: str, per_day: float) -> int:
+    """lo_page(最後の開催日が lo_last)から、target の日付が載るページを密度で推定する。
+
+    推定ページ = 今いるページ + (target − 最後の開催日) × 密度 ÷ 1ページのカード数。少なくとも1つ先。
+    """
+    gap = (datetime.date.fromisoformat(target) - datetime.date.fromisoformat(lo_last)).days
+    return lo_page + max(1, round(gap * per_day / _LP_SWEEP_PAGE_SIZE))
+
+
+class _LpSweepReader:
+    """一覧ページの取得・取得済みページの記録・カードの振り分けをまとめて持つ(1回の巡回の間だけ)。"""
+
+    def __init__(self, near_end: str, until: str, runs: list):
+        self.near_end, self.until, self.runs = near_end, until, runs
+        self.pages, self.how = [], {}      # 取得したページの行 / ページ番号→経路
+        self.page_info = {}                # 開催日の読めたページ: 番号→{"first", "last"}
+        self.cache = {}
+        self.fetched = 0
+        self.seen, self.cards = set(), []
+        self.dated = []                    # 密度の計算用: 読んだ(重複でない)開催日つきのカードすべて
+        self.excluded = dict.fromkeys(_LP_SWEEP_EXCLUDED, 0)
+        self.order_breaks = []
+
+    def fetch(self, page: int, how: str):
+        """(カード, 問題)。取得済みのページは取り直さない。上限に達していれば問題 "max_pages"。"""
+        if page in self.cache:
+            return self.cache[page], None
+        if self.fetched >= LP_SWEEP_MAX_PAGES:
+            return [], "max_pages"
+        self.fetched += 1
         try:
             page_cards, problem = ticketsite.livepocket_listing_page(
                 page, sort=ticketsite.LIVEPOCKET_SORT_DATE_ASC)
@@ -2899,36 +2951,148 @@ def _lp_sweep_read_pages(until: str) -> dict:
             print(f"  LivePocket 一覧の {page} ページ目で例外: {type(e).__name__} {e}")
             page_cards, problem = [], "exception"
         if problem:
-            stop = problem
-            break
+            return [], problem
         dates = [c["start_date"] for c in page_cards if c.get("start_date")]
+        self.pages.append({"page": page, "cards": len(page_cards),
+                           "first": dates[0] if dates else None,
+                           "last": dates[-1] if dates else None})
+        self.how[page] = how
         if dates:
-            prev = next((p for p in reversed(pages) if p["last"]), None)
-            if prev and prev["last"] > dates[0]:
-                order_breaks.append({"prev_page": prev["page"], "prev_last": prev["last"],
-                                     "page": page, "first": dates[0]})
-        pages.append({"page": page, "cards": len(page_cards),
-                      "first": dates[0] if dates else None,
-                      "last": dates[-1] if dates else None})
-        over = False
-        for c in page_cards:
-            if c["url"] in seen:
-                excluded["duplicate"] += 1
+            self.page_info[page] = {"first": dates[0], "last": dates[-1]}
+        self.cache[page] = page_cards
+        return page_cards, None
+
+    def _wanted(self, date: str) -> bool:
+        return date <= self.near_end or any(a <= date <= b for a, b in self.runs)
+
+    def take(self, c: dict) -> None:
+        if c["url"] in self.seen:
+            self.excluded["duplicate"] += 1
+            return
+        self.seen.add(c["url"])
+        date = c.get("start_date")
+        if not date:
+            self.excluded["date_unreadable"] += 1
+            return
+        self.dated.append(c)
+        if self._wanted(date):
+            self.cards.append(c)
+        elif date > self.until:
+            self.excluded["beyond_range"] += 1
+        else:
+            self.excluded["other_turn"] += 1
+
+    def read_sequential(self, start: int, end: str, how: str = "順読み") -> str:
+        """start ページから順に、end を超える開催日が出るまで読む。
+
+        "done"(end を超えた)、または止まった理由("max_pages"・途中停止の種類・"order_broken")を返す。
+        順に読んだ区間で開催日順が崩れたら、そのページのカードを取ってから "order_broken" を返す。
+        """
+        page, chain_prev = start, None
+        while True:
+            page_cards, problem = self.fetch(page, how)
+            if problem:
+                return problem
+            dates = [c["start_date"] for c in page_cards if c.get("start_date")]
+            broken = False
+            if dates:
+                if chain_prev and chain_prev["last"] > dates[0]:
+                    self.order_breaks.append({"prev_page": chain_prev["page"], "prev_last": chain_prev["last"],
+                                              "page": page, "first": dates[0]})
+                    broken = True
+                chain_prev = {"page": page, "last": dates[-1]}
+            for c in page_cards:
+                self.take(c)
+            if broken:
+                return "order_broken"
+            if any(d > end for d in dates):
+                return "done"
+            page += 1
+
+
+def _lp_sweep_find_page(reader: _LpSweepReader, target: str, per_day, limit: Optional[int] = None) -> dict:
+    """target の日付を読み始めるページを探す(遠い組へのジャンプ)。
+
+    取得済みのページと、近い側で測った密度(per_day)から推定して飛ぶ。target が載るページの
+    1つ手前を読み始めのページにする(巡回の途中で一覧がずれて、境目のカードを読み飛ばさない
+    ため。重複は URL の重複除外で落ちる)。取得は limit(既定 LP_SWEEP_JUMP_LIMIT)回まで。
+    サイト側の date_after が使えるようになったら、この関数の中身だけを差し替える。
+
+    返り値: {"result": "success"|"failed"|"stop", "start": 読み始めのページ(読むものが無ければ
+    None), "jumps": 取得した回数, "stop": 止まった理由("stop" のときだけ)}。
+    """
+    limit = LP_SWEEP_JUMP_LIMIT if limit is None else limit
+    jumps, beyond = 0, None   # beyond: 空応答だった(=最終ページより後と分かった)最小のページ
+    while True:
+        info = reader.page_info
+        reach = [p for p, i in info.items() if i["last"] >= target]
+        hi = min(reach) if reach else None
+        lo = max((p for p, i in info.items() if i["last"] < target and (hi is None or p < hi)), default=0)
+        top = None
+        if hi is not None and (beyond is None or hi < beyond):
+            # target が載っている(最初の開催日 <= target)か、1つ手前が target より前なら見つかった
+            if info[hi]["first"] <= target or hi == lo + 1:
+                return {"result": "success", "start": max(hi - 1, 1), "jumps": jumps}
+            top = hi
+        elif beyond is not None:
+            if beyond == lo + 1:   # 一覧の最後まで読んでも target に届かない。読むものが無い
+                return {"result": "success", "start": None, "jumps": jumps}
+            top = beyond
+        if jumps >= limit:
+            return {"result": "failed", "start": None, "jumps": jumps}
+        if top is None:
+            if not per_day or not lo:
+                return {"result": "failed", "start": None, "jumps": jumps}
+            nxt = _lp_sweep_estimate_page(lo, info[lo]["last"], target, per_day)
+        else:
+            nxt = max(lo + 1, min((lo + top) // 2, top - 1))
+        _, problem = reader.fetch(nxt, "ジャンプ")
+        jumps += 1
+        if problem == "no_cards":
+            beyond = nxt if beyond is None else min(beyond, nxt)
+        elif problem:
+            return {"result": "stop", "start": None, "jumps": jumps, "stop": problem}
+
+
+def _lp_sweep_read_pages(today: str, near_end: str, until: str, runs: list) -> dict:
+    """近い側(near_end まで)を順に読み、続けて今日読む遠い組(runs)へ飛んで読む。"""
+    reader = _LpSweepReader(near_end, until, runs)
+    jumps = [{"start": a, "end": b, "result": "not_done", "jumps": 0, "start_page": None, "complete": False}
+             for a, b in runs]
+    stop = reader.read_sequential(1, near_end)
+    # 密度は近い側を読んだ時点で測る(最後の日は途中までの可能性があるので数えない)
+    density = _lp_sweep_density(reader.dated, today)
+    if stop == "done":
+        stop = None
+        for j in jumps:
+            found = _lp_sweep_find_page(reader, j["start"], density["per_day"] if density else None)
+            j["jumps"], j["start_page"] = found["jumps"], found["start"]
+            if found["result"] == "stop":
+                stop = found["stop"]
+                break
+            if found["result"] == "failed":
+                j["result"] = "failed"
                 continue
-            seen.add(c["url"])
-            date = c.get("start_date")
-            if not date:
-                excluded["date_unreadable"] += 1
-            elif date > until:
-                excluded["beyond_range"] += 1
-                over = True
-            else:
-                cards.append(c)
-        if over:
-            stop = "date_limit"
-            break
-    return {"pages": pages, "cards": cards, "excluded": excluded, "stop": stop,
-            "order_breaks": order_breaks}
+            j["result"] = "success"
+            if found["start"] is None:
+                j["complete"] = True
+                continue
+            end = reader.read_sequential(found["start"], j["end"])
+            if end != "done":
+                stop = end
+                break
+            j["complete"] = True
+        if stop is None:
+            stop = "jump_failed" if any(j["result"] == "failed" for j in jumps) else "date_limit"
+    elif stop == "order_broken":
+        # 近い側を読む途中で順序が崩れた。ジャンプはやめ、近い側の結果だけを出す
+        kept = [c for c in reader.cards if c["start_date"] <= near_end]
+        reader.excluded["other_turn"] += len(reader.cards) - len(kept)
+        reader.cards = kept
+    return {"pages": reader.pages, "page_how": reader.how, "cards": reader.cards,
+            "excluded": reader.excluded, "stop": stop, "order_breaks": reader.order_breaks,
+            "density": density, "jumps": jumps,
+            "missed": sum(1 for j in jumps if not j["complete"])}
 
 
 def _lp_sweep_probe(after_page: int) -> list:
@@ -3005,11 +3169,38 @@ def _lp_real_row_keys(today: str) -> set:
     return keys
 
 
+_LP_SWEEP_JUMP_RESULTS = {"success": "成功", "failed": "失敗", "not_done": "未実施"}
+
+
+def _lp_sweep_dates_text(report: dict) -> str:
+    """今日読む日付の範囲(近い側と、今日の組の遠い側の区間)。"""
+    parts = [f"近い側 {report['today']}〜{report['near_end']}"]
+    parts += [f"遠い側 {a}〜{b}" if a != b else f"遠い側 {a}" for a, b in report["runs"]]
+    return " / ".join(parts)
+
+
+def _lp_sweep_jump_text(j: dict) -> str:
+    text = f"{j['start']}〜{j['end']}: {_LP_SWEEP_JUMP_RESULTS[j['result']]}"
+    if j["result"] != "not_done":
+        text += f"(取得 {j['jumps']} 回"
+        text += f"、{j['start_page']} ページ目から読む" if j["start_page"] else ""
+        text += ")"
+    if j["result"] == "success" and not j["complete"]:
+        text += " ※読み切れていない"
+    return text
+
+
 def _print_lp_sweep_report(report: dict) -> None:
     print(f"LivePocket 開催日順の巡回(試運転・DB書き込みなし): {report['until']} まで / "
           f"{len(report['pages'])} ページ / {_LP_SWEEP_STOPS[report['stop']]}")
+    print(f"  読む日付: {_lp_sweep_dates_text(report)} / 今日の組 {report['turn']}")
+    for j in report["jumps"]:
+        print(f"  ジャンプ {_lp_sweep_jump_text(j)}")
+    if not report["jumps"]:
+        print("  ジャンプ: 今日読む遠い組なし")
     for p in report["pages"]:
-        print(f"  {p['page']} ページ目: {p['cards']} 件 / 開催日 {p['first'] or '不明'} 〜 {p['last'] or '不明'}")
+        print(f"  {p['page']} ページ目: {p['cards']} 件 / 開催日 {p['first'] or '不明'} 〜 {p['last'] or '不明'}"
+              f" / {report['page_how'].get(p['page'], '')}")
     print("  除外の内訳: " + " / ".join(
         f"{label} {report['excluded'][key]} 件" for key, label in _LP_SWEEP_EXCLUDED.items()))
     print(f"  範囲内で開催日が今日より前のカード: {report['past']} 件")
@@ -3043,17 +3234,22 @@ def _lp_sweep_density_text(density) -> str:
 def lp_sweep_summary_markdown(report: dict) -> str:
     lines = ["## LivePocket 開催日順の巡回(試運転・DB書き込みなし)", "",
              f"- 範囲: {report['until']} まで",
+             f"- 読む日付: {_lp_sweep_dates_text(report)}",
+             f"- 今日の組: {report['turn']}(日付の通し番号を3で割った余り)",
              f"- 読んだページ: {len(report['pages'])}",
              f"- 終了の理由: {_LP_SWEEP_STOPS[report['stop']]}",
+             f"- 読み切れなかった遠い組: {report['missed']} / {len(report['jumps'])} 組",
              f"- 途中で止まったか: {'はい' if report['interrupted'] else 'いいえ'}",
              f"- 範囲内で開催日が今日より前のカード: {report['past']} 件",
              f"- 密度: {_lp_sweep_density_text(report['density'])}",
              f"- 開催日順の崩れ: {len(report['order_breaks'])} か所",
              f"- ブラウザの使用: {report['browser_used']} / {report['browser_limit']} ページ"]
     lines += [f"- ⚠ {_venue_md(w)}" for w in report["warnings"]]
-    lines += ["", "| ページ | 件数 | 最初の開催日 | 最後の開催日 |", "|---|---|---|---|"]
-    lines += [f"| {p['page']} | {p['cards']} | {p['first'] or '不明'} | {p['last'] or '不明'} |"
-              for p in report["pages"]]
+    lines += ["", "### ジャンプの結果(遠い組)", ""]
+    lines += [f"- {_lp_sweep_jump_text(j)}" for j in report["jumps"]] or ["- 今日読む遠い組なし"]
+    lines += ["", "| ページ | 件数 | 最初の開催日 | 最後の開催日 | 経路 |", "|---|---|---|---|---|"]
+    lines += [f"| {p['page']} | {p['cards']} | {p['first'] or '不明'} | {p['last'] or '不明'} | "
+              f"{report['page_how'].get(p['page'], '')} |" for p in report["pages"]]
     lines += ["", "### 探り読み(計測のみ。対象の判定には使わない)", ""]
     if report["probe_note"]:
         lines += [f"- {report['probe_note']}"]
@@ -3091,19 +3287,22 @@ def run_livepocket_sweep() -> dict:
     now = datetime.datetime.now(JST)
     today = now.strftime("%Y-%m-%d")
     until = (now + datetime.timedelta(days=LP_SWEEP_DAYS)).strftime("%Y-%m-%d")
+    near_end = min(until, (now + datetime.timedelta(days=max(LP_SWEEP_NEAR_DAYS, 0))).strftime("%Y-%m-%d"))
     retry_before = (now - datetime.timedelta(days=LP_SWEEP_RETRY_DAYS)).strftime("%Y-%m-%d")
+    runs = _lp_sweep_far_runs(now.date(), max(LP_SWEEP_NEAR_DAYS, 0), LP_SWEEP_DAYS)
 
-    report = _lp_sweep_read_pages(until)
+    report = _lp_sweep_read_pages(today, near_end, until, runs)
     report["until"] = until
+    report["today"], report["near_end"], report["runs"] = today, near_end, runs
+    report["turn"] = now.date().toordinal() % 3
     report["interrupted"] = report["stop"] in _LP_SWEEP_INTERRUPTED
     report["past"] = sum(1 for c in report["cards"] if c["start_date"] < today)
-    report["density"] = _lp_sweep_density(report["cards"], today)
     # 探り読みは計測だけ。結果は report["probes"] に置き、report["cards"] には入れない
     report["probes"], report["probe_note"] = [], ""
     if LP_SWEEP_PROBE_PAGES and report["interrupted"]:
         report["probe_note"] = "途中停止したので読まなかった"
     elif LP_SWEEP_PROBE_PAGES:
-        report["probes"] = _lp_sweep_probe(report["pages"][-1]["page"] if report["pages"] else 0)
+        report["probes"] = _lp_sweep_probe(max((p["page"] for p in report["pages"]), default=0))
         if not report["probes"]:
             report["probe_note"] = "指定のページはすでに読んだ範囲にある"
     report["browser_used"], report["browser_limit"] = ticketsite.browser_usage()
@@ -3111,6 +3310,9 @@ def run_livepocket_sweep() -> dict:
     for b in report["order_breaks"]:
         warnings.append(f"開催日順が崩れています: {b['prev_page']} ページ目の最後 {b['prev_last']} の後、"
                         f"{b['page']} ページ目の最初が {b['first']}")
+    if report["missed"]:
+        warnings.append(f"遠い組 {len(report['jumps'])} 組のうち {report['missed']} 組を読み切れず、"
+                        "その日付の対象を取りこぼしています")
 
     lineup_idx = lineup.build_index(build_idol_name_list())
     if not lineup_idx:
