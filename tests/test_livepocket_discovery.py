@@ -352,6 +352,9 @@ def sweep(monkeypatch, fake_sb):
     """
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     monkeypatch.setattr(worker, "LP_SWEEP_PROBE_PAGES", ())
+    # 案G PR2 で近い側の既定は2日になった。PR1 までのテストは「今日〜+14日をすべて順に読む」
+    # 前提なので、近い側を14日にして従来の読み方に固定する。周回とジャンプは sweep_g で確かめる
+    monkeypatch.setattr(worker, "LP_SWEEP_NEAR_DAYS", 14)
 
     def run(pages, rows=(), last=None):
         monkeypatch.delenv("LIVEPOCKET_LISTING", raising=False)
@@ -387,7 +390,9 @@ def target_names(report):
 
 def test_sweep_defaults():
     assert worker.LP_SWEEP_DAYS == 14
-    assert worker.LP_SWEEP_MAX_PAGES == 20
+    assert worker.LP_SWEEP_MAX_PAGES == 30   # PR2 で 20 から上げた
+    assert worker.LP_SWEEP_NEAR_DAYS == 2
+    assert worker.LP_SWEEP_JUMP_LIMIT == 4
     assert worker.LP_SWEEP_RETRY_DAYS == 3
 
 
@@ -592,7 +597,7 @@ def test_sweep_guard_swallows_exceptions(monkeypatch, capsys):
 
 def test_sweep_noise_defaults():
     assert worker.LP_SWEEP_MAX_SPAN_DAYS == 3
-    assert worker.LP_SWEEP_PROBE_PAGES == (25, 30, 40, 50)
+    assert worker.LP_SWEEP_PROBE_PAGES == ()   # PR2 で既定を空(探り読みOFF)にした
     assert "コラボカフェ" in worker._LP_SWEEP_NON_SHOW_WORDS
     assert "キャンペーン" in worker._LP_SWEEP_NON_SHOW_WORDS
 
@@ -710,9 +715,11 @@ def test_sweep_warns_when_date_order_breaks(monkeypatch, sweep, tmp_path, capsys
 
     report, requested, _ = sweep(pages)
 
-    # この PR ではジャンプが無いので、警告だけで読み方は変えない
-    assert requested == [1, 2, 3]
-    assert target_names(report) == ["hit0", "hit1", "hit2", "hit3", "hit4"]
+    # PR2 から、順に読んだ区間で崩れたらそこで止める(途中停止に数える)。崩れたページまでは読む
+    assert requested == [1, 2]
+    assert report["stop"] == "order_broken"
+    assert report["interrupted"] is True
+    assert target_names(report) == ["hit0", "hit1", "hit2", "hit3"]
     assert report["order_breaks"] == [{"prev_page": 1, "prev_last": day(3), "page": 2, "first": day(2)}]
     assert any("開催日順が崩れています" in w for w in report["warnings"])
     assert "⚠ 開催日順が崩れています" in capsys.readouterr().out
@@ -855,7 +862,7 @@ def test_sweep_trial_with_noise_and_probe_never_writes_db(monkeypatch, sweep, fa
     pages = probe_pages(
         [[sweep_card("hit_old", day(-2)), sweep_card("hit_long", day(-10), end=day(20)),
           sweep_card("hit コラボカフェ", day(1)), sweep_card("hit0", day(3))],
-         [sweep_card("hit1", day(2))]],   # 開催日順の崩れも起こす
+         [sweep_card("hit1", day(4))]],   # PR2 から崩れは途中停止になり探り読みが止まるので、崩さない
         {25: [sweep_card("hit_probe", day(5))], 30: "no_cards"})
     last = {cache_key("hit0"): day(-5)}
 
@@ -863,7 +870,7 @@ def test_sweep_trial_with_noise_and_probe_never_writes_db(monkeypatch, sweep, fa
 
     assert requested == [1, 2, 25, 30]
     assert target_names(report) == ["hit0", "hit1"]
-    assert report["order_breaks"]
+    assert not report["order_breaks"]
     ingest.assert_not_called()
     worker.ticketsite.fetch_event.assert_not_called()
     fake_sb.set_last_seen.assert_not_called()
@@ -871,6 +878,396 @@ def test_sweep_trial_with_noise_and_probe_never_writes_db(monkeypatch, sweep, fa
     called = {c[0] for c in fake_sb.method_calls}
     assert called == {"get_ticket_page_rows", "get_last_seen_by_prefix"}
     assert not [n for n in called if n.startswith(("set_", "upsert", "insert", "delete", "update"))]
+
+
+# --- 案G PR2: 周回とジャンプ(LP-SWEEP-DATE-DESIGN.md §3.1・§3.2・§7) ---
+
+def day_pages(first, last, per_page=20, tag="hit"):
+    """1ページ=1日の一覧。ページ p の開催日は day(first + p - 1)。per_page=20 なら密度は1日20件。"""
+    return [[sweep_card(f"{tag}_{off}_{i}", day(off)) for i in range(per_page)]
+            for off in range(first, last + 1)]
+
+
+def serve_pages(monkeypatch, pages):
+    """ticketsite の一覧取得を pages で差し替え、読みに行ったページ番号の記録を返す。"""
+    requested = []
+
+    def fake_page(page, sort):
+        requested.append(page)
+        entry = pages[page - 1] if page <= len(pages) else "no_cards"
+        if isinstance(entry, str):
+            return [], entry
+        return entry, None
+
+    monkeypatch.setattr(worker.ticketsite, "livepocket_listing_page", fake_page)
+    return requested
+
+
+def new_reader(monkeypatch, pages, read=()):
+    """pages を返す一覧に対する reader。read のページは先に順読みで取得済みにする。"""
+    requested = serve_pages(monkeypatch, pages)
+    reader = worker._LpSweepReader(day(2), day(14), [])
+    for p in read:
+        reader.fetch(p, "順読み")
+    return reader, requested
+
+
+@pytest.fixture
+def sweep_g(monkeypatch, sweep):
+    """PR2 の既定(近い側2日)で動かす sweep。"""
+    monkeypatch.setattr(worker, "LP_SWEEP_NEAR_DAYS", 2)
+    return sweep
+
+
+def expected_dates(report):
+    """今日読む予定の日付: 今日〜近い側の最終日と、今日の組の遠い側の区間。"""
+    today = datetime.date.fromisoformat(report["today"])
+    near_end = datetime.date.fromisoformat(report["near_end"])
+    out = {(today + datetime.timedelta(days=i)).isoformat() for i in range((near_end - today).days + 1)}
+    for a, b in report["runs"]:
+        d, last = datetime.date.fromisoformat(a), datetime.date.fromisoformat(b)
+        while d <= last:
+            out.add(d.isoformat())
+            d += datetime.timedelta(days=1)
+    return out
+
+
+@pytest.mark.parametrize("start", [datetime.date(2026, 11, 27), datetime.date(2026, 12, 20),
+                                   datetime.date(2028, 2, 20)])
+def test_far_runs_cover_each_date_exactly_once_in_three_days(start):
+    for k in range(60):   # 月・年・うるう日をまたぐ
+        t = start + datetime.timedelta(days=k)
+        runs3 = [worker._lp_sweep_far_runs(t + datetime.timedelta(days=i), 2, 14) for i in range(3)]
+        # t+5 〜 t+14 は連続3日のどの日でも遠い側に入る日付
+        for off in range(5, 15):
+            d = (t + datetime.timedelta(days=off)).isoformat()
+            hits = sum(1 for runs in runs3 if any(a <= d <= b for a, b in runs))
+            assert hits == 1, (t, d)
+
+
+def test_far_runs_stay_inside_far_range_and_come_in_groups_of_up_to_3_days():
+    for k in range(120):
+        t = datetime.date(2026, 11, 1) + datetime.timedelta(days=k)
+        runs = worker._lp_sweep_far_runs(t, 2, 14)
+        assert runs and len(runs) <= 2
+        for a, b in runs:
+            da, db = datetime.date.fromisoformat(a), datetime.date.fromisoformat(b)
+            assert t + datetime.timedelta(days=3) <= da <= db <= t + datetime.timedelta(days=14)
+            assert (db - da).days <= 2
+        assert runs == sorted(runs)
+
+
+def test_far_runs_with_no_near_days_start_tomorrow_at_the_earliest():
+    for k in range(9):
+        t = datetime.date(2026, 11, 27) + datetime.timedelta(days=k)
+        runs = worker._lp_sweep_far_runs(t, 0, 14)
+        assert runs
+        assert min(a for a, _ in runs) >= (t + datetime.timedelta(days=1)).isoformat()
+        assert max(b for _, b in runs) <= (t + datetime.timedelta(days=14)).isoformat()
+
+
+def test_far_runs_are_empty_when_near_days_cover_the_range():
+    assert worker._lp_sweep_far_runs(datetime.date(2026, 11, 27), 14, 14) == []
+
+
+@pytest.mark.parametrize("lo_page, lo_last, target, per_day, expected", [
+    (5, "2026-11-20", "2026-11-25", 40, 15),     # 5日 × 1日40件 ÷ 20 = 10ページ先
+    (3, "2026-11-20", "2026-11-24", 20, 7),      # 4日 × 20 ÷ 20 = 4ページ先
+    (5, "2026-11-20", "2026-11-21", 1, 6),       # 計算上は0ページ先でも、少なくとも1つ先
+    (2, "2026-11-30", "2026-12-04", 10, 4),      # 月をまたいでも日数で数える
+])
+def test_estimate_page_from_density(lo_page, lo_last, target, per_day, expected):
+    assert worker._lp_sweep_estimate_page(lo_page, lo_last, target, per_day) == expected
+
+
+def test_find_page_hits_when_the_estimate_is_right(monkeypatch):
+    reader, requested = new_reader(monkeypatch, day_pages(0, 30, 1), read=[1, 2])
+
+    found = worker._lp_sweep_find_page(reader, day(10), 20, limit=4)
+
+    # 2ページ目(+1日)から9日先 = 11ページ目(+10日)。その1つ手前の10ページ目から読む
+    assert found == {"result": "success", "start": 10, "jumps": 1}
+    assert requested == [1, 2, 11]
+    assert reader.how[11] == "ジャンプ"
+
+
+def test_find_page_goes_back_when_the_estimate_overshoots(monkeypatch):
+    reader, requested = new_reader(monkeypatch, day_pages(0, 30, 1), read=[1, 2])
+
+    found = worker._lp_sweep_find_page(reader, day(10), 40, limit=4)
+
+    # 密度を倍に見積もって20ページ目(+19日)へ行き過ぎ、2〜20 の中間の11ページ目へ戻る
+    assert requested == [1, 2, 20, 11]
+    assert found == {"result": "success", "start": 10, "jumps": 2}
+
+
+def test_find_page_moves_on_when_the_estimate_falls_short(monkeypatch):
+    reader, requested = new_reader(monkeypatch, day_pages(0, 30, 1), read=[1, 2])
+
+    found = worker._lp_sweep_find_page(reader, day(9), 10, limit=4)
+
+    # 密度を半分に見積もるので、6→8→9→10 と少しずつ進む。4回目で +9日のページに当たる
+    assert requested == [1, 2, 6, 8, 9, 10]
+    assert found == {"result": "success", "start": 9, "jumps": 4}
+
+
+def test_find_page_gives_up_after_the_jump_limit(monkeypatch):
+    reader, requested = new_reader(monkeypatch, day_pages(0, 30, 1), read=[1, 2])
+
+    found = worker._lp_sweep_find_page(reader, day(9), 10, limit=3)
+
+    assert requested == [1, 2, 6, 8, 9]
+    assert found == {"result": "failed", "start": None, "jumps": 3}
+
+
+def test_find_page_without_density_does_not_jump(monkeypatch):
+    reader, requested = new_reader(monkeypatch, day_pages(0, 30, 1), read=[1, 2])
+
+    found = worker._lp_sweep_find_page(reader, day(10), None, limit=4)
+
+    assert found == {"result": "failed", "start": None, "jumps": 0}
+    assert requested == [1, 2]
+
+
+def test_find_page_with_zero_limit_does_not_jump(monkeypatch):
+    reader, requested = new_reader(monkeypatch, day_pages(0, 30, 1), read=[1, 2])
+
+    found = worker._lp_sweep_find_page(reader, day(10), 20, limit=0)
+
+    assert found["result"] == "failed"
+    assert requested == [1, 2]
+
+
+def test_find_page_starts_one_page_before_the_boundary_without_fetching(monkeypatch):
+    # 読んだページの中に target の前後が入っているなら、取得せずに手前のページを返す
+    pages = day_pages(0, 4, 1) + [[sweep_card("hit_far", day(8))]]
+    reader, requested = new_reader(monkeypatch, pages, read=[1, 2, 3, 4, 5, 6])
+
+    found = worker._lp_sweep_find_page(reader, day(6), 20, limit=4)
+
+    assert found == {"result": "success", "start": 5, "jumps": 0}   # 6ページ目の1つ手前
+    assert requested == [1, 2, 3, 4, 5, 6]
+
+
+def test_find_page_starts_from_page_1_when_target_is_before_everything(monkeypatch):
+    reader, _ = new_reader(monkeypatch, day_pages(0, 5, 1), read=[1])
+
+    found = worker._lp_sweep_find_page(reader, day(0), 20, limit=4)
+
+    assert found == {"result": "success", "start": 1, "jumps": 0}
+
+
+def test_find_page_has_nothing_to_read_beyond_the_last_page(monkeypatch):
+    reader, requested = new_reader(monkeypatch, day_pages(0, 2, 1), read=[1, 2, 3])
+
+    found = worker._lp_sweep_find_page(reader, day(9), 20, limit=4)
+
+    # 10ページ目は空応答 → 中間の6、さらに4も空応答。4ページ目が最終ページより後と分かる
+    assert requested == [1, 2, 3, 10, 6, 4]
+    assert found == {"result": "success", "start": None, "jumps": 3}
+
+
+def test_find_page_reports_a_stop_from_the_site(monkeypatch):
+    pages = day_pages(0, 2, 1) + ["waf"] * 7
+    reader, requested = new_reader(monkeypatch, pages, read=[1, 2, 3])
+
+    found = worker._lp_sweep_find_page(reader, day(9), 20, limit=4)
+
+    assert found == {"result": "stop", "start": None, "jumps": 1, "stop": "waf"}
+    assert requested == [1, 2, 3, 10]
+
+
+def test_sweep_pr2_reads_near_days_every_day_and_only_todays_far_groups(sweep_g):
+    report, requested, ingest = sweep_g(day_pages(-2, 16))
+
+    wanted = expected_dates(report)
+    assert report["near_end"] == day(2)
+    assert {day(0), day(1), day(2)} <= wanted
+    assert {c["start_date"] for c in report["targets"]} == wanted
+    assert len(report["targets"]) == 20 * len(wanted)   # 過去の2日分(開催済み)は対象に入らない
+    # 今日の組でない遠い日付は読まない
+    far_other = {day(o) for o in range(3, 15)} - wanted
+    assert far_other and not far_other & {c["start_date"] for c in report["targets"]}
+    assert report["excluded"]["other_turn"] > 0
+    assert report["stop"] == "date_limit"
+    assert report["interrupted"] is False
+    assert report["jumps"] and all(j["result"] == "success" and j["complete"] for j in report["jumps"])
+    assert report["missed"] == 0
+    assert len(requested) <= worker.LP_SWEEP_MAX_PAGES
+    ingest.assert_not_called()
+
+
+def test_sweep_pr2_jumps_instead_of_reading_every_page(sweep_g):
+    report, requested, _ = sweep_g(day_pages(-2, 16))
+
+    # 全ページ(19)を順に読むより少ない。遠い組には推定のジャンプで入る(密度は1日20件=1ページ)
+    assert len(requested) < 19
+    assert report["density"]["per_day"] == 20.0
+    # 今日の組は必ず +6日以降に始まる区間を含むので、読み済みのページでは足りず、推定で飛ぶ
+    assert any(how == "ジャンプ" for how in report["page_how"].values())
+    assert sum(j["jumps"] for j in report["jumps"]) <= worker.LP_SWEEP_JUMP_LIMIT * len(report["runs"])
+
+
+def test_sweep_pr2_with_zero_near_days_reads_only_today_every_day(monkeypatch, sweep_g):
+    monkeypatch.setattr(worker, "LP_SWEEP_NEAR_DAYS", 0)
+
+    report, _, _ = sweep_g(day_pages(-2, 16))
+
+    wanted = expected_dates(report)
+    assert report["near_end"] == day(0)
+    assert day(0) in wanted
+    assert {c["start_date"] for c in report["targets"]} == wanted
+    assert all(j["result"] == "success" and j["complete"] for j in report["jumps"])
+
+
+def test_sweep_pr2_stops_at_the_page_limit(monkeypatch, sweep_g):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 6)   # 近い側を読むだけで使い切る(6ページ目まで)
+
+    report, requested, _ = sweep_g(day_pages(-2, 16))
+
+    assert requested == [1, 2, 3, 4, 5, 6]
+    assert report["stop"] == "max_pages"
+    assert report["interrupted"] is False
+    assert report["missed"] == len(report["runs"])
+    assert not any(j["complete"] for j in report["jumps"])
+    assert any("取りこぼし" in w for w in report["warnings"])
+
+
+def test_sweep_pr2_page_limit_counts_pages_fetched_for_jumps_too(monkeypatch, sweep_g):
+    monkeypatch.setattr(worker, "LP_SWEEP_MAX_PAGES", 9)
+
+    report, requested, _ = sweep_g(day_pages(-2, 16))
+
+    assert len(requested) <= 9
+    assert report["stop"] == "max_pages"
+
+
+def test_sweep_pr2_jump_failure_skips_the_group_and_goes_on(monkeypatch, sweep_g):
+    monkeypatch.setattr(worker, "LP_SWEEP_JUMP_LIMIT", 0)   # 取得済みのページで足りる組以外は見つけられない
+
+    report, requested, ingest = sweep_g(day_pages(-2, 16))
+
+    failed = [j for j in report["jumps"] if j["result"] == "failed"]
+    assert failed
+    assert report["stop"] == "jump_failed"
+    assert report["interrupted"] is False
+    assert report["missed"] >= len(failed)
+    assert all(j["jumps"] == 0 for j in report["jumps"])
+    # 近い側は読めている
+    assert {day(0), day(1), day(2)} <= {c["start_date"] for c in report["targets"]}
+    ingest.assert_not_called()
+
+
+def test_sweep_pr2_stops_jumping_when_order_breaks_in_the_near_band(sweep_g, fake_sb):
+    far_start = worker._lp_sweep_far_runs(datetime.datetime.now(worker.JST).date(), 2, 14)[0][0]
+    far_day = (datetime.date.fromisoformat(far_start) - datetime.date.fromisoformat(day())).days
+    pages = [[sweep_card("hit_a", day(0)), sweep_card("hit_b", day(2))],
+             [sweep_card("hit_c", day(1)), sweep_card("hit_far", day(far_day))],   # 前のページの最後より前に戻る
+             [sweep_card("hit_never", day(2))]]
+
+    report, requested, ingest = sweep_g(pages)
+
+    # 崩れたページまでで止まり、遠い組へは飛ばない。結果は近い側(今日〜+2日)だけ
+    assert requested == [1, 2]
+    assert report["stop"] == "order_broken"
+    assert report["interrupted"] is True
+    assert len(report["order_breaks"]) == 1
+    assert target_names(report) == ["hit_a", "hit_b", "hit_c"]
+    assert report["excluded"]["other_turn"] == 1
+    assert [j["result"] for j in report["jumps"]] == ["not_done"] * len(report["runs"])
+    assert report["missed"] == len(report["runs"])
+    ingest.assert_not_called()
+    assert {c[0] for c in fake_sb.method_calls} == {"get_ticket_page_rows", "get_last_seen_by_prefix"}
+
+
+def test_sweep_pr2_stops_jumping_when_order_breaks_while_reading_a_far_group(sweep_g):
+    runs = worker._lp_sweep_far_runs(datetime.datetime.now(worker.JST).date(), 2, 14)
+    first = (datetime.date.fromisoformat(runs[0][0]) - datetime.date.fromisoformat(day())).days
+    pages = day_pages(-2, 16)
+    # 開始ページ(first+2)から順に読むと、その2つ先で日付が過去へ戻る
+    pages[first + 3] = [sweep_card("hit_weird", day(first - 2))]
+
+    report, _, _ = sweep_g(pages)
+
+    assert report["stop"] == "order_broken"
+    assert report["interrupted"] is True
+    assert len(report["order_breaks"]) == 1
+    assert report["jumps"][0]["result"] == "success"     # ジャンプ自体は成功
+    assert report["jumps"][0]["complete"] is False       # 組は読み切れていない
+    assert report["missed"] == len(report["runs"])
+    assert all(j["result"] == "not_done" for j in report["jumps"][1:])
+
+
+def test_sweep_pr2_waf_during_a_jump_is_an_interruption(monkeypatch, sweep_g):
+    pages = day_pages(-2, 16)
+    runs = worker._lp_sweep_far_runs(datetime.datetime.now(worker.JST).date(), 2, 14)
+    last_start = (datetime.date.fromisoformat(runs[-1][0]) - datetime.date.fromisoformat(day())).days
+    assert last_start >= 6   # 最後の区間は読み済みのページより先から始まる
+    pages[last_start + 2] = "waf"   # 推定で飛ぶページ(last_start+3 ページ目)
+
+    report, _, _ = sweep_g(pages)
+
+    assert report["stop"] == "waf"
+    assert report["interrupted"] is True
+
+
+def test_sweep_pr2_summary_and_log_show_dates_group_and_jump_results(sweep_g, monkeypatch, tmp_path, capsys):
+    path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(path))
+
+    report, _, _ = sweep_g(day_pages(-2, 16))
+
+    text = path.read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    today_group = datetime.datetime.now(worker.JST).date().toordinal() % 3
+    for blob in (text, out):
+        assert f"近い側 {day(0)}〜{day(2)}" in blob
+        assert "遠い側" in blob
+        assert "成功" in blob
+        assert "次回以降に回した日付" in blob
+    assert f"今日の組 {today_group}" in out
+    assert f"今日の組: {today_group}" in text
+    assert "ジャンプの結果" in text
+    assert "| 経路 |" in text
+    assert "| ジャンプ |" in text
+
+
+def test_sweep_pr2_jump_results_distinguish_success_failure_and_not_done():
+    j = {"start": "2026-12-01", "end": "2026-12-02", "jumps": 2, "start_page": 12, "complete": True}
+    assert "成功" in worker._lp_sweep_jump_text({**j, "result": "success"})
+    assert "失敗" in worker._lp_sweep_jump_text({**j, "result": "failed", "start_page": None, "complete": False})
+    assert "未実施" in worker._lp_sweep_jump_text({**j, "result": "not_done", "complete": False})
+    assert "読み切れていない" in worker._lp_sweep_jump_text({**j, "result": "success", "complete": False})
+
+
+def test_sweep_pr2_never_writes_db_even_with_jumps(sweep_g, fake_sb):
+    report, requested, ingest = sweep_g(day_pages(-2, 16))
+
+    assert report["jumps"]
+    ingest.assert_not_called()
+    worker.ticketsite.fetch_event.assert_not_called()
+    fake_sb.set_last_seen.assert_not_called()
+    fake_sb.upsert_auto_events.assert_not_called()
+    called = {c[0] for c in fake_sb.method_calls}
+    assert called == {"get_ticket_page_rows", "get_last_seen_by_prefix"}
+
+
+def test_sweep_pr2_keeps_card_selection_rules(sweep_g):
+    # 対象の選び方(status・名前一致・除外)は PR1 のまま。近い側のカードで確かめる
+    pages = [[sweep_card("hit_ok", day(1)), sweep_card("hit_sold", day(1), status="販売終了"),
+              sweep_card("miss_group", day(1)), sweep_card("hit_old", day(-1)),
+              sweep_card("hit コラボカフェ", day(1)), sweep_card("hit_long", day(0), end=day(9))],
+             [sweep_card("hit_next", day(3))]]
+
+    report, _, _ = sweep_g(pages)
+
+    assert "hit_ok" in target_names(report)
+    assert not {"hit_sold", "miss_group", "hit_old", "hit コラボカフェ", "hit_long"} & set(target_names(report))
+    assert report["excluded"]["status"] == 1
+    assert report["excluded"]["no_group"] == 1
+    assert report["excluded"]["ended"] == 1
+    assert report["excluded"]["non_show"] == 1
+    assert report["excluded"]["long_span"] == 1
 
 
 # --- main() への組み込み ---
